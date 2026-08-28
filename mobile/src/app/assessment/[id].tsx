@@ -1,0 +1,31 @@
+import { useEffect, useState } from 'react';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { api } from '@/lib/api';
+import type { Assessment } from '@/lib/types';
+import { colors, radius, spacing } from '@/constants/tokens';
+
+export default function AssessmentScreen() {
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const router = useRouter();
+  const [assessment, setAssessment] = useState<Assessment | null>(null);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [score, setScore] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api<{ assessment: Assessment }>(`/assessments/${id}/start/`).then(result => setAssessment(result.assessment)).catch(reason => setError(reason.message)); }, [id]);
+  const submit = async () => {
+    if (!assessment?.questions) return;
+    setBusy(true); setError('');
+    try { const result = await api<{ score: string }>(`/assessments/${id}/submit/`, { method: 'POST', body: JSON.stringify({ answers: assessment.questions.map(question => ({ question_id: question.id, answer: answers[question.id] })) }) }); setScore(Math.round(Number(result.score))); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to submit assessment.'); }
+    finally { setBusy(false); }
+  };
+  if (!assessment && !error) return <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>;
+  if (!assessment) return <View style={styles.center}><Text style={styles.error}>{error}</Text></View>;
+  if (score !== null) return <View style={styles.center}><Text style={styles.resultLabel}>Assessment submitted</Text><Text style={styles.resultScore}>{score}%</Text><Text style={styles.resultText}>Your result and competency progress have been recorded.</Text><Pressable onPress={() => router.back()} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Return to assessments</Text></Pressable></View>;
+  const complete = assessment.questions?.every(question => Boolean(answers[question.id]?.trim())) ?? false;
+  return <ScrollView style={styles.screen} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled"><Text style={styles.title}>{assessment.title}</Text>{assessment.instructions ? <Text style={styles.description}>{assessment.instructions}</Text> : null}{error ? <Text style={styles.errorBox}>{error}</Text> : null}<View style={styles.questions}>{assessment.questions?.map((question, index) => <View key={question.id} style={styles.question}><Text style={styles.questionNumber}>Question {index + 1} of {assessment.questions?.length}</Text><Text style={styles.questionText}>{question.prompt}</Text>{question.question_type === 'short' ? <TextInput style={styles.input} placeholder="Your answer" value={answers[question.id] ?? ''} onChangeText={value => setAnswers(current => ({ ...current, [question.id]: value }))} /> : question.options.map(option => <Pressable key={option} onPress={() => setAnswers(current => ({ ...current, [question.id]: option }))} style={[styles.option, answers[question.id] === option && styles.selectedOption]}><View style={[styles.radio, answers[question.id] === option && styles.selectedRadio]} /><Text style={styles.optionText}>{option}</Text></Pressable>)}</View>)}</View><Pressable disabled={!complete || busy} onPress={submit} style={[styles.primaryButton, (!complete || busy) && styles.disabled]}><Text style={styles.primaryButtonText}>{busy ? 'Submitting…' : 'Submit assessment'}</Text></Pressable><Text style={styles.notice}>Submit only when you have answered every question. Your score will be recorded immediately.</Text></ScrollView>;
+}
+
+const styles = StyleSheet.create({ screen: { flex: 1, backgroundColor: colors.background }, content: { padding: spacing.lg, paddingBottom: spacing.xxl }, center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, backgroundColor: colors.background }, title: { color: colors.text, fontSize: 23, fontWeight: '800' }, description: { color: colors.secondaryText, lineHeight: 20, marginTop: spacing.sm }, questions: { marginTop: spacing.xl, gap: spacing.lg }, question: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.panel, padding: spacing.lg }, questionNumber: { color: colors.primary, fontSize: 12, fontWeight: '700', textTransform: 'uppercase' }, questionText: { color: colors.text, fontSize: 16, fontWeight: '700', lineHeight: 23, marginTop: spacing.sm, marginBottom: spacing.lg }, option: { minHeight: 46, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: radius.control, paddingHorizontal: spacing.md, marginBottom: spacing.sm }, selectedOption: { borderColor: colors.primary, backgroundColor: colors.primarySoft }, radio: { width: 18, height: 18, borderRadius: 9, borderWidth: 1, borderColor: colors.secondaryText, marginRight: spacing.md }, selectedRadio: { borderWidth: 5, borderColor: colors.primary }, optionText: { color: colors.text, flex: 1 }, input: { minHeight: 46, borderWidth: 1, borderColor: colors.border, borderRadius: radius.control, paddingHorizontal: spacing.md, color: colors.text }, primaryButton: { minHeight: 48, backgroundColor: colors.primary, borderRadius: radius.control, alignItems: 'center', justifyContent: 'center', marginTop: spacing.xl, paddingHorizontal: spacing.xl }, primaryButtonText: { color: '#fff', fontWeight: '700' }, disabled: { opacity: .5 }, notice: { color: colors.secondaryText, fontSize: 12, lineHeight: 18, textAlign: 'center', marginTop: spacing.md }, error: { color: colors.error, textAlign: 'center' }, errorBox: { color: colors.error, backgroundColor: '#fef3f2', padding: spacing.md, borderRadius: radius.control, marginTop: spacing.lg }, resultLabel: { color: colors.success, fontWeight: '700', textTransform: 'uppercase', fontSize: 12 }, resultScore: { color: colors.text, fontSize: 48, fontWeight: '800', marginTop: spacing.md }, resultText: { color: colors.secondaryText, textAlign: 'center', lineHeight: 20, marginTop: spacing.sm, maxWidth: 300 } });

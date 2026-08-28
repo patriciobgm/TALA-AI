@@ -1,25 +1,26 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
-  Avatar, Box, Button, Card, Divider, FormControl, InputAdornment, InputLabel,
+  Avatar, Box, Button, Card, Divider, FormControl, InputLabel,
   Alert, CircularProgress, LinearProgress, MenuItem, Select, Stack, Table, TableBody, TableCell, TableContainer,
-  TableHead, TableRow, TextField, Typography,
+  TableHead, TableRow, Typography,
 } from '@mui/material';
-import { ArrowForward, GroupsOutlined, Search, TrendingUp, WarningAmberOutlined } from '@mui/icons-material';
+import { ArrowForward, GroupsOutlined, TrendingUp, WarningAmberOutlined } from '@mui/icons-material';
 import { api } from '../api/client';
 import type { ApiLearner } from '../api/types';
 import { Metric } from '../components/Metric';
 import { PageHeader } from '../components/PageHeader';
 import { StatusChip } from '../components/StatusChip';
 import { downloadText } from '../utils/download';
+import { DataTablePagination, DataTableToolbar, SortableTableCell, useDataTable } from '../components/DataTable';
 
 export function TeacherDashboard({ onSelectLearner }: { onSelectLearner: (id: number) => void }) {
-  const [query, setQuery] = useState('');
   const [status, setStatus] = useState('All');
   const [learners, setLearners] = useState<ApiLearner[] | null>(null);
   const [error, setError] = useState('');
   const load = () => api<ApiLearner[]>('/dashboard/teacher/learners/').then(setLearners).catch(reason => setError(reason.message));
   useEffect(() => { void load(); }, []);
-  const visible = useMemo(() => (learners ?? []).filter(l => (status === 'All' || l.status === status) && l.name.toLowerCase().includes(query.toLowerCase())), [learners, query, status]);
+  const statusRows = (learners ?? []).filter(learner => status === 'All' || learner.status === status);
+  const table = useDataTable(statusRows, { searchText: learner => `${learner.name} ${learner.email} ${learner.section} ${learner.status}`, sortValues: { learner: learner => learner.name, progress: learner => learner.progress, gaps: learner => learner.gaps, assessment: learner => learner.assessment, status: learner => learner.status }, initialSort: 'learner' });
   if (!learners && !error) return <Box sx={{ minHeight: 360, display: 'grid', placeItems: 'center' }}><CircularProgress size={28} /></Box>;
   const counts = { onTrack: learners?.filter(item => item.status === 'On track').length ?? 0, monitor: learners?.filter(item => item.status === 'Monitor').length ?? 0, intervention: learners?.filter(item => item.status === 'Intervention').length ?? 0 };
   const masteryRate = learners?.length ? Math.round((learners.filter(item => (item.assessment ?? 0) >= 75).length / learners.length) * 100) : 0;
@@ -41,19 +42,19 @@ export function TeacherDashboard({ onSelectLearner }: { onSelectLearner: (id: nu
         <Box sx={{ p: 2.5, display: 'flex', justifyContent: 'space-between', gap: 2, alignItems: { xs: 'stretch', sm: 'center' }, flexDirection: { xs: 'column', sm: 'row' } }}>
           <Box><Typography variant="h2">Learner progress</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .25 }}>General Mathematics · Grade 11 – Rizal</Typography></Box>
           <Stack direction="row" gap={1}>
-            <TextField size="small" placeholder="Search learners" value={query} onChange={e => setQuery(e.target.value)} slotProps={{ input: { startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment> } }} sx={{ width: { xs: '100%', sm: 210 } }} />
             <FormControl size="small" sx={{ minWidth: 120 }}><InputLabel>Status</InputLabel><Select value={status} label="Status" onChange={e => setStatus(e.target.value)}><MenuItem value="All">All</MenuItem><MenuItem value="On track">On track</MenuItem><MenuItem value="Monitor">Monitor</MenuItem><MenuItem value="Intervention">Intervention</MenuItem></Select></FormControl>
           </Stack>
         </Box>
+        <Divider /><DataTableToolbar query={table.query} onQuery={table.setQuery} placeholder="Search learners" count={table.filteredCount} />
         <TableContainer sx={{ overflowX: 'auto' }}><Table aria-label="Learner recovery progress" sx={{ minWidth: 720 }}>
-          <TableHead><TableRow><TableCell>Learner</TableCell><TableCell sx={{ width: 190 }}>Plan progress</TableCell><TableCell align="right">Learning gaps</TableCell><TableCell align="right">Last assessment</TableCell><TableCell>Status</TableCell><TableCell align="right"><span className="visually-hidden">Action</span></TableCell></TableRow></TableHead>
-          <TableBody>{visible.map(learner => <TableRow hover key={learner.id} sx={{ cursor: 'pointer', '&:last-child td': { borderBottom: 0 } }} onClick={() => onSelectLearner(learner.id)}>
+          <TableHead><TableRow><SortableTableCell column="learner" label="Learner" orderBy={table.orderBy} direction={table.direction} onSort={table.toggleSort} /><SortableTableCell column="progress" label="Plan progress" orderBy={table.orderBy} direction={table.direction} onSort={table.toggleSort} sx={{ width: 190 }} /><SortableTableCell column="gaps" label="Learning gaps" orderBy={table.orderBy} direction={table.direction} onSort={table.toggleSort} align="right" /><SortableTableCell column="assessment" label="Last assessment" orderBy={table.orderBy} direction={table.direction} onSort={table.toggleSort} align="right" /><SortableTableCell column="status" label="Status" orderBy={table.orderBy} direction={table.direction} onSort={table.toggleSort} /><TableCell align="right"><span className="visually-hidden">Action</span></TableCell></TableRow></TableHead>
+          <TableBody>{table.pageRows.map(learner => <TableRow hover key={learner.id} sx={{ cursor: 'pointer', '&:last-child td': { borderBottom: 0 } }} onClick={() => onSelectLearner(learner.id)}>
             <TableCell><Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}><Avatar sx={{ width: 32, height: 32, fontSize: 12, bgcolor: '#edf1f5', color: 'text.primary' }}>{learner.name.split(' ').map(part => part[0]).slice(0, 2).join('')}</Avatar><Box><Typography variant="body2" fontWeight={650}>{learner.name}</Typography><Typography variant="caption" color="text.secondary">{learner.section}</Typography></Box></Box></TableCell>
             <TableCell><Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}><LinearProgress variant="determinate" value={learner.progress} sx={{ flex: 1, height: 6, borderRadius: 2, bgcolor: '#e8edf1', '& .MuiLinearProgress-bar': { bgcolor: learner.status === 'Intervention' ? 'error.main' : learner.status === 'Monitor' ? 'warning.main' : 'success.main' } }} /><Typography variant="body2" sx={{ width: 34 }}>{learner.progress}%</Typography></Box></TableCell>
             <TableCell align="right">{learner.gaps}</TableCell><TableCell align="right">{learner.assessment === null ? '—' : `${Math.round(learner.assessment)}%`}</TableCell><TableCell><StatusChip label={learner.status} /></TableCell><TableCell align="right"><Button size="small" endIcon={<ArrowForward />} onClick={(e) => { e.stopPropagation(); onSelectLearner(learner.id); }}>View</Button></TableCell>
           </TableRow>)}</TableBody>
         </Table></TableContainer>
-        {visible.length === 0 && <Box sx={{ p: 5, textAlign: 'center' }}><Typography fontWeight={650}>No learners found</Typography><Typography variant="body2" color="text.secondary">Try a different name or status filter.</Typography></Box>}
+        {table.filteredCount === 0 && <Box sx={{ p: 5, textAlign: 'center' }}><Typography fontWeight={650}>No learners found</Typography><Typography variant="body2" color="text.secondary">Try a different name or status filter.</Typography></Box>}<DataTablePagination count={table.filteredCount} page={table.page} rowsPerPage={table.rowsPerPage} onPage={table.setPage} onRowsPerPage={table.setRowsPerPage} />
       </Card>
 
       <Stack gap={3}>

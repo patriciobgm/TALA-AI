@@ -21,21 +21,32 @@ async function refreshAccess() {
   if (!response.ok) { clearSession(); return false; }
   const data = await response.json();
   sessionStorage.setItem('tala_access', data.access);
+  if (data.refresh) sessionStorage.setItem('tala_refresh', data.refresh);
   return true;
+}
+
+function errorMessage(data: unknown, status: number) {
+  if (typeof data === 'object' && data) {
+    if ('detail' in data) return String((data as { detail: unknown }).detail);
+    for (const [field, value] of Object.entries(data)) {
+      const message = Array.isArray(value) ? value[0] : value;
+      if (typeof message === 'string') return `${field.replaceAll('_', ' ')}: ${message}`;
+    }
+  }
+  return status >= 500 ? 'The server encountered an error. Try again or check the backend log.' : 'The request could not be completed.';
 }
 
 export async function api<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
   const token = sessionStorage.getItem('tala_access');
   const headers = new Headers(options.headers);
-  if (!headers.has('Content-Type') && options.body) headers.set('Content-Type', 'application/json');
+  if (!headers.has('Content-Type') && options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(`${API_URL}${path}`, { ...options, headers });
   if (response.status === 401 && retry && await refreshAccess()) return api<T>(path, options, false);
   if (!response.ok) {
     let data: unknown;
     try { data = await response.json(); } catch { data = null; }
-    const message = typeof data === 'object' && data && 'detail' in data ? String((data as { detail: unknown }).detail) : 'The request could not be completed.';
-    throw new ApiError(response.status, message, data);
+    throw new ApiError(response.status, errorMessage(data, response.status), data);
   }
   return response.status === 204 ? undefined as T : response.json();
 }

@@ -1,6 +1,9 @@
 from collections import defaultdict
+from datetime import timedelta
 from django.db import transaction
-from .models import CompetencyResult, RecoveryActivity, RecoveryPlan
+from django.utils import timezone
+from .models import CompetencyResult, Notification, RecoveryActivity, RecoveryPlan
+from .notifications import notify
 
 DEVELOPING_THRESHOLD = 50
 
@@ -36,6 +39,7 @@ def create_recovery_plan(student, result):
     if created:
         resources = result.competency.resources.filter(is_approved=True).order_by("difficulty", "id")[:3]
         for position, resource in enumerate(resources, start=1):
-            RecoveryActivity.objects.create(plan=plan, resource=resource, title=resource.title, position=position)
-        RecoveryActivity.objects.create(plan=plan, title="Mastery check", position=len(resources) + 1)
+            RecoveryActivity.objects.create(plan=plan, resource=resource, title=resource.title, position=position, due_at=timezone.now() + timedelta(days=position * 2))
+        RecoveryActivity.objects.create(plan=plan, title="Mastery check", position=len(resources) + 1, due_at=timezone.now() + timedelta(days=(len(resources) + 1) * 2))
+        notify(recipient=student, kind=Notification.Kind.PLAN_ASSIGNED, title="Recovery plan ready", message=f"Your recovery plan for {result.competency.title} is ready. Start with the first activity.", action_url="/recovery", deduplication_key=f"plan:{plan.id}:assigned")
     return plan

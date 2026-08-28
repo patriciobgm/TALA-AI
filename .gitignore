@@ -4,10 +4,16 @@ frontend/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/*.tsbuildinfo
 backend/.venv/
 backend/__pycache__/
 backend/**/__pycache__/
 backend/db.sqlite3
+backend/media/
+backend/staticfiles/
 .pytest_cache/
 .coverage
 htmlcov/

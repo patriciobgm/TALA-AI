@@ -9,14 +9,21 @@ ACTION_GUIDANCE = {
     "check": "Ask one short question that checks understanding. Do not provide its answer yet.",
 }
 
-def answer_student(plan, message: str, action: str = "explain"):
-    resources = retrieve_approved_resources(plan.competency, message)
+def answer_student(plan, message: str, action: str = "explain", activity=None, question=None, selected_answer: str = ""):
+    selection = " ".join(value for value in [getattr(activity, "title", ""), getattr(question, "prompt", ""), message] if value)
+    resources = retrieve_approved_resources(plan.competency, selection)
     context = "\n\n".join(f"[Resource {resource.id}: {resource.title}]\n{resource.content}" for resource in resources)
     system = f"""You are TALA, an academic recovery tutor for a Grade 11 learner.
 Stay within this competency: {plan.competency.title}.
 Use only the approved resource excerpts below. If they are insufficient, say that approved material is unavailable and advise the learner to ask the teacher.
 Do not change grades, declare mastery, or reveal hidden assessment answers.
 {ACTION_GUIDANCE.get(action, ACTION_GUIDANCE['explain'])}
+
+Current learner context:
+- Activity: {getattr(activity, 'title', 'No activity selected')}
+- Practice question: {getattr(question, 'prompt', 'No practice question selected')}
+- Answer currently selected by the learner: {selected_answer or 'No answer selected'}
+Use this context when the learner says “this question,” “my answer,” or asks for a hint. Do not claim the selected answer is correct unless the approved material supports that conclusion.
 
 Approved resources:
 {context or 'No approved resource was retrieved.'}"""
