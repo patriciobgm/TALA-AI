@@ -27,7 +27,7 @@ export function LoginPage({ onLogin }: { onLogin: (email: string, password: stri
   };
   return <Box sx={{ minHeight: '100vh', bgcolor: '#f4f6f7', display: 'flex', flexDirection: 'column' }}>
     <Box component="header" sx={{ height: 68, px: { xs: 2.5, sm: 4 }, display: 'flex', alignItems: 'center', bgcolor: '#fff', borderBottom: '1px solid', borderColor: 'divider' }}>
-      <Box sx={{ display: 'flex', gap: 1.25, alignItems: 'center' }}><Box sx={{ width: 34, height: 34, display: 'grid', placeItems: 'center', bgcolor: 'primary.main', color: '#fff', borderRadius: 1, fontWeight: 800 }}>T</Box><Box><Typography fontWeight={800} lineHeight={1.1}>TALA-AI</Typography><Typography variant="caption" color="text.secondary">Academic Recovery</Typography></Box></Box>
+      <Box sx={{ display: 'flex', gap: 1.25, alignItems: 'center' }}><Box component="img" src="/school_logo.png" alt="Talavera Senior High School" sx={{ width: 38, height: 38, objectFit: 'contain' }} /><Box><Typography fontWeight={800} lineHeight={1.1}>TALA-AI</Typography><Typography variant="caption" color="text.secondary">Talavera Senior High School</Typography></Box></Box>
     </Box>
     <Box component="main" sx={{ flex: 1, display: 'grid', placeItems: 'center', px: 2.5, py: { xs: 5, sm: 8 } }}>
       <Box sx={{ width: '100%', maxWidth: 440, bgcolor: '#fff', border: '1px solid', borderColor: 'divider', borderRadius: 2, p: { xs: 3, sm: 4 } }}><Typography variant="h1">{forgot ? 'Reset your password' : 'Sign in'}</Typography><Typography color="text.secondary" sx={{ mt: 1 }}>{forgot ? 'We will send a single-use reset link to your school email.' : 'Use your school-issued TALA account.'}</Typography>

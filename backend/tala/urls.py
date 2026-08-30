@@ -4,6 +4,8 @@ from django.contrib import admin
 from django.urls import include, path
 from rest_framework_simplejwt.views import TokenRefreshView
 from recovery.auth_views import CurrentUserView, TalaTokenObtainPairView, begin_mfa_setup, change_password, confirm_mfa_setup, confirm_password_reset, disable_mfa, profile, profile_avatar, request_password_reset
+from recovery.views import remedial_consent_response
+from recovery.tutor_views import learner_support_insight
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -18,6 +20,8 @@ urlpatterns = [
     path("api/auth/mfa/setup/", begin_mfa_setup),
     path("api/auth/mfa/confirm/", confirm_mfa_setup),
     path("api/auth/mfa/disable/", disable_mfa),
+    path("api/remedial-consent/", remedial_consent_response),
+    path("api/tutor/learners/<int:student_id>/insight/", learner_support_insight),
     path("api/", include("recovery.urls")),
 ]
 

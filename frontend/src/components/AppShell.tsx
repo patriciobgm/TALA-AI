@@ -1,25 +1,30 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Avatar, Badge, Box, Button, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Popover, Tooltip, Typography } from '@mui/material';
-import { AssessmentOutlined, AutoStoriesOutlined, DashboardOutlined, LibraryBooksOutlined, LogoutOutlined, ManageAccountsOutlined, Menu as MenuIcon, NotificationsNoneOutlined, PeopleAltOutlined, TuneOutlined, UploadFileOutlined } from '@mui/icons-material';
+import { Avatar, Badge, Box, Button, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Popover, TextField, Tooltip, Typography } from '@mui/material';
+import { AssessmentOutlined, AutoStoriesOutlined, DashboardOutlined, FactCheckOutlined, LibraryBooksOutlined, LogoutOutlined, ManageAccountsOutlined, Menu as MenuIcon, NotificationsNoneOutlined, PeopleAltOutlined, SchoolOutlined, TuneOutlined, UploadFileOutlined } from '@mui/icons-material';
 import { api } from '../api/client';
 import type { ApiNotification } from '../api/types';
 import { StudentTalaChat } from './StudentTalaChat';
 import { TalaChatContext, type TalaLearningContext } from './TalaChatContext';
+import { TeachingScopeContext } from './TeachingScopeContext';
+import { StudentScopeContext } from './StudentScopeContext';
+import type { ApiClass, ApiSubject } from '../api/types';
 
 export type Role = 'teacher' | 'student' | 'admin';
-export type Route = 'overview' | 'recovery' | 'learners' | 'assessments' | 'resources' | 'content' | 'notifications' | 'reports' | 'settings' | 'profile';
+export type Route = 'overview' | 'recovery' | 'materials' | 'learners' | 'classes' | 'assessments' | 'resources' | 'competencies' | 'content' | 'notifications' | 'reports' | 'research' | 'settings' | 'profile';
 type NavigationItem = { id: Route; label: string; icon: ReactNode };
 type NavigationGroup = { label: string; items: NavigationItem[] };
 
 const roleNavigation: Record<Role, NavigationGroup[]> = {
   teacher: [
-    { label: 'Workspace', items: [{ id: 'overview', label: 'Recovery overview', icon: <DashboardOutlined /> }, { id: 'learners', label: 'Learners', icon: <PeopleAltOutlined /> }] },
-    { label: 'Teaching', items: [{ id: 'assessments', label: 'Assessments', icon: <AssessmentOutlined /> }, { id: 'resources', label: 'Learning resources', icon: <LibraryBooksOutlined /> }, { id: 'content', label: 'Content imports', icon: <UploadFileOutlined /> }, { id: 'reports', label: 'Reports & analytics', icon: <AutoStoriesOutlined /> }] },
+    { label: 'Workspace', items: [{ id: 'overview', label: 'Recovery Overview', icon: <DashboardOutlined /> }, { id: 'learners', label: 'Learners', icon: <PeopleAltOutlined /> }] },
+    { label: 'Teaching', items: [{ id: 'assessments', label: 'Assessments', icon: <AssessmentOutlined /> }, { id: 'resources', label: 'Learning Resources', icon: <LibraryBooksOutlined /> }, { id: 'content', label: 'Content Imports', icon: <UploadFileOutlined /> }, { id: 'reports', label: 'Reports & Analytics', icon: <AutoStoriesOutlined /> }] },
   ],
-  student: [{ label: 'My learning', items: [{ id: 'overview', label: 'My progress', icon: <DashboardOutlined /> }, { id: 'recovery', label: 'Recovery plan', icon: <AutoStoriesOutlined /> }, { id: 'assessments', label: 'Assessments', icon: <AssessmentOutlined /> }] }],
+  student: [{ label: 'My Learning', items: [{ id: 'overview', label: 'My Progress', icon: <DashboardOutlined /> }, { id: 'recovery', label: 'Recovery Plan', icon: <AutoStoriesOutlined /> }, { id: 'materials', label: 'Learning Materials', icon: <LibraryBooksOutlined /> }, { id: 'assessments', label: 'Assessments', icon: <AssessmentOutlined /> }] }],
   admin: [
-    { label: 'Administration', items: [{ id: 'overview', label: 'System overview', icon: <DashboardOutlined /> }, { id: 'learners', label: 'Users & classes', icon: <PeopleAltOutlined /> }] },
-    { label: 'Academic content', items: [{ id: 'resources', label: 'Curriculum', icon: <LibraryBooksOutlined /> }, { id: 'content', label: 'Content governance', icon: <UploadFileOutlined /> }, { id: 'settings', label: 'System settings', icon: <TuneOutlined /> }] },
+    { label: 'Administration', items: [{ id: 'overview', label: 'System Overview', icon: <DashboardOutlined /> }, { id: 'learners', label: 'Users & Security', icon: <PeopleAltOutlined /> }, { id: 'classes', label: 'Class Management', icon: <SchoolOutlined /> }] },
+    { label: 'Academic Content', items: [{ id: 'resources', label: 'Subjects', icon: <LibraryBooksOutlined /> }, { id: 'content', label: 'Content Governance', icon: <UploadFileOutlined /> }] },
+    { label: 'Evaluation', items: [{ id: 'research', label: 'Research Evidence', icon: <FactCheckOutlined /> }] },
+    { label: 'System', items: [{ id: 'settings', label: 'System Settings', icon: <TuneOutlined /> }] },
   ],
 };
 
@@ -35,9 +40,14 @@ export function AppShell({ children, route, onRoute, role, userName, userEmail, 
   const [notificationAnchor, setNotificationAnchor] = useState<HTMLElement | null>(null);
   const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
   const [learningContext, setLearningContext] = useState<TalaLearningContext | null>(null);
+  const [teachingContext, setTeachingContext] = useState<{ subjects: ApiSubject[]; classes: ApiClass[] }>({ subjects: [], classes: [] });
+  const [selectedSubjectId, setSelectedSubjectIdState] = useState<number | null>(() => Number(sessionStorage.getItem('tala_teacher_subject')) || null);
+  const [studentSubjects, setStudentSubjects] = useState<ApiSubject[]>([]);
+  const [studentSubjectId, setStudentSubjectIdState] = useState<number | null>(() => Number(sessionStorage.getItem('tala_student_subject')) || null);
+  const [studentScopeLoading, setStudentScopeLoading] = useState(role === 'student');
   const groups = roleNavigation[role];
   const unread = notifications.filter(item => !item.is_read).length;
-  const currentLabel = groups.flatMap(group => group.items).find(item => item.id === route)?.label ?? (route === 'notifications' ? 'Notifications' : route === 'profile' ? 'Account & security' : 'Workspace');
+  const currentLabel = groups.flatMap(group => group.items).find(item => item.id === route)?.label ?? (route === 'competencies' ? 'Competencies' : route === 'notifications' ? 'Notifications' : route === 'profile' ? 'Account & Security' : 'Workspace');
   const roleLabel = role === 'teacher' ? 'ARAL Tutor' : role === 'student' ? className ?? 'Student' : 'Administrator';
   const initials = userName.split(' ').map(part => part[0]).slice(-2).join('');
 
@@ -48,6 +58,25 @@ export function AppShell({ children, route, onRoute, role, userName, userEmail, 
     void load(); const timer = window.setInterval(load, 60000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
+  useEffect(() => {
+    if (role !== 'teacher') return;
+    api<{ subjects: ApiSubject[]; classes: ApiClass[] }>('/dashboard/teacher/context/').then(context => {
+      setTeachingContext(context);
+      setSelectedSubjectIdState(current => current && context.subjects.some(item => item.id === current) ? current : context.subjects[0]?.id ?? null);
+    }).catch(() => undefined);
+  }, [role]);
+  useEffect(() => {
+    if (role !== 'student') return;
+    api<{ subjects: ApiSubject[] }>('/dashboard/student/context/').then(context => {
+      setStudentSubjects(context.subjects);
+      setStudentSubjectIdState(current => current && context.subjects.some(item => item.id === current) ? current : context.subjects[0]?.id ?? null);
+    }).catch(() => { setStudentSubjects([]); setStudentSubjectIdState(null); }).finally(() => setStudentScopeLoading(false));
+  }, [role]);
+  const setSelectedSubjectId = (subjectId: number) => { sessionStorage.setItem('tala_teacher_subject', String(subjectId)); setSelectedSubjectIdState(subjectId); };
+  const selectedSubject = teachingContext.subjects.find(item => item.id === selectedSubjectId) ?? null;
+  const scopedClasses = selectedSubject ? teachingContext.classes.filter(item => item.grade_level === selectedSubject.grade_level) : teachingContext.classes;
+  const selectedStudentSubject = studentSubjects.find(item => item.id === studentSubjectId) ?? null;
+  const setStudentSubjectId = (subjectId: number) => { sessionStorage.setItem('tala_student_subject', String(subjectId)); setStudentSubjectIdState(subjectId); };
   const openNotification = async (item: ApiNotification) => {
     if (!item.is_read) {
       await api(`/notifications/${item.id}/read/`, { method: 'POST' });
@@ -62,21 +91,21 @@ export function AppShell({ children, route, onRoute, role, userName, userEmail, 
   };
 
   const navigation = <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', bgcolor: '#f7f9fa' }}>
-    <Box onClick={() => onRoute('overview')} role="button" tabIndex={0} onKeyDown={event => { if (event.key === 'Enter') onRoute('overview'); }} sx={{ height: 76, px: 2.5, display: 'flex', alignItems: 'center', cursor: 'pointer', borderBottom: '1px solid', borderColor: 'divider' }}><Box sx={{ width: 36, height: 36, display: 'grid', placeItems: 'center', bgcolor: 'primary.main', color: '#fff', borderRadius: 1, fontWeight: 850, mr: 1.25 }}>T</Box><Box><Typography fontWeight={800} lineHeight={1.15}>TALA-AI</Typography><Typography variant="caption" color="text.secondary">Academic Recovery</Typography></Box></Box>
-    <Box sx={{ px: 2.5, py: 2, borderBottom: '1px solid', borderColor: 'divider' }}><Typography variant="caption" color="text.secondary" fontWeight={650}>{role === 'admin' ? 'System administration' : role === 'student' ? 'My learning' : 'Teacher workspace'}</Typography><Typography variant="body2" fontWeight={700} sx={{ mt: .25 }}>{role === 'student' ? className ?? 'Unassigned class' : role === 'teacher' ? 'Assigned curriculum' : 'Academic configuration'}</Typography></Box>
+    <Box onClick={() => onRoute('overview')} role="button" tabIndex={0} onKeyDown={event => { if (event.key === 'Enter') onRoute('overview'); }} sx={{ height: 76, px: 2.5, display: 'flex', alignItems: 'center', cursor: 'pointer', borderBottom: '1px solid', borderColor: 'divider' }}><Box component="img" src="/school_logo.png" alt="Talavera Senior High School" sx={{ width: 40, height: 40, objectFit: 'contain', mr: 1.25 }} /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} lineHeight={1.15}>TALA-AI</Typography><Typography variant="caption" color="text.secondary" noWrap>Talavera Senior High School</Typography></Box></Box>
+    <Box sx={{ px: 2.5, py: 2, borderBottom: '1px solid', borderColor: 'divider', minWidth: 0 }}><Typography variant="caption" color="text.secondary" fontWeight={650}>{role === 'admin' ? 'System Administration' : role === 'student' ? 'My Learning' : 'Teacher Workspace'}</Typography>{role === 'teacher' && teachingContext.subjects.length > 1 ? <TextField select size="small" label="Teaching subject" value={selectedSubjectId ?? ''} onChange={event => setSelectedSubjectId(Number(event.target.value))} fullWidth sx={{ mt: 1.25, minWidth: 0, '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }} SelectProps={{ renderValue: value => { const subject = teachingContext.subjects.find(item => item.id === Number(value)); return subject ? `${subject.code} · ${subject.name}` : ''; }, MenuProps: { PaperProps: { sx: { maxWidth: 360 } } } }}>{teachingContext.subjects.map(subject => <MenuItem key={subject.id} value={subject.id} sx={{ whiteSpace: 'normal' }}>{subject.code} · {subject.name}</MenuItem>)}</TextField> : role === 'student' && studentSubjects.length > 1 ? <TextField select size="small" label="Learning subject" value={studentSubjectId ?? ''} onChange={event => setStudentSubjectId(Number(event.target.value))} fullWidth sx={{ mt: 1.25, minWidth: 0, '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }} SelectProps={{ renderValue: value => { const subject = studentSubjects.find(item => item.id === Number(value)); return subject ? `${subject.code} · ${subject.name}` : ''; }, MenuProps: { PaperProps: { sx: { maxWidth: 360 } } } }}>{studentSubjects.map(subject => <MenuItem key={subject.id} value={subject.id} sx={{ whiteSpace: 'normal' }}>{subject.code} · {subject.name}</MenuItem>)}</TextField> : <Typography variant="body2" fontWeight={700} noWrap title={role === 'teacher' ? selectedSubject?.name : role === 'student' ? selectedStudentSubject?.name : undefined} sx={{ mt: .25 }}>{role === 'student' ? selectedStudentSubject?.name ?? className ?? 'No assigned subject' : role === 'teacher' ? selectedSubject?.name ?? 'Assigned Curriculum' : 'Academic Configuration'}</Typography>}</Box>
     <Box component="nav" aria-label="Primary navigation" sx={{ flex: 1, overflowY: 'auto', px: 1.5, py: 2 }}>{groups.map(group => <Box key={group.label} sx={{ mb: 2.5 }}><Typography variant="overline" color="text.secondary" sx={{ px: 1.25, fontSize: 10, fontWeight: 800, letterSpacing: '.09em' }}>{group.label}</Typography><List disablePadding sx={{ mt: .5 }}>{group.items.map(item => <ListItemButton key={item.id} selected={route === item.id} aria-current={route === item.id ? 'page' : undefined} onClick={() => { onRoute(item.id); setMobileOpen(false); }} sx={{ minHeight: 42, px: 1.25, mb: .25, borderRadius: 1, color: route === item.id ? 'primary.dark' : 'text.secondary', '&.Mui-selected': { bgcolor: '#e7eff4', color: 'primary.dark', boxShadow: 'inset 3px 0 0 #174b7a' } }}><ListItemIcon sx={{ minWidth: 36, color: 'inherit', '& .MuiSvgIcon-root': { fontSize: 20 } }}>{item.icon}</ListItemIcon><ListItemText primary={item.label} slotProps={{ primary: { fontSize: 13, fontWeight: route === item.id ? 750 : 600 } }} /></ListItemButton>)}</List></Box>)}</Box>
     <Divider /><Box sx={{ p: 1.5, display: 'grid', gridTemplateColumns: '36px minmax(0, 1fr)', gap: 1, alignItems: 'center' }}><Avatar sx={{ width: 36, height: 36, bgcolor: '#dce8ef', color: 'primary.dark', fontSize: 12, fontWeight: 750 }}>{initials}</Avatar><Box sx={{ minWidth: 0 }}><Typography variant="body2" fontWeight={700} noWrap>{userName}</Typography><Typography variant="caption" color="text.secondary" noWrap title={userEmail}>{roleLabel}</Typography></Box></Box>
   </Box>;
 
-  return <TalaChatContext.Provider value={{ learningContext, setLearningContext }}><Box sx={{ minHeight: '100vh', bgcolor: 'background.default', display: 'flex' }}>
+  return <StudentScopeContext.Provider value={role === 'student' ? { subjects: studentSubjects, selectedSubjectId: studentSubjectId, selectedSubject: selectedStudentSubject, setSelectedSubjectId: setStudentSubjectId, loading: studentScopeLoading } : null}><TeachingScopeContext.Provider value={role === 'teacher' ? { subjects: teachingContext.subjects, classes: scopedClasses, selectedSubjectId, selectedSubject, setSelectedSubjectId } : null}><TalaChatContext.Provider value={{ learningContext, setLearningContext }}><Box sx={{ minHeight: '100vh', bgcolor: 'background.default', display: 'flex' }}>
     <Box component="aside" sx={{ width: 252, flexShrink: 0, display: { xs: 'none', md: 'block' }, height: '100vh', position: 'sticky', top: 0, borderRight: '1px solid', borderColor: 'divider' }}>{navigation}</Box>
     <Drawer anchor="left" open={mobileOpen} onClose={() => setMobileOpen(false)} sx={{ display: { md: 'none' }, '& .MuiDrawer-paper': { width: 280 } }}>{navigation}</Drawer>
     <Box sx={{ minWidth: 0, flex: 1 }}>
       <Box component="header" sx={{ height: 76, px: { xs: 2, sm: 3, lg: 4 }, display: 'flex', alignItems: 'center', gap: 1, bgcolor: '#fff', borderBottom: '1px solid', borderColor: 'divider', position: 'sticky', top: 0, zIndex: theme => theme.zIndex.appBar }}>
         <IconButton onClick={() => setMobileOpen(true)} edge="start" aria-label="Open navigation" sx={{ display: { md: 'none' }, mr: .5 }}><MenuIcon /></IconButton>
-        <Box sx={{ minWidth: 0 }}><Typography variant="caption" color="text.secondary">{role === 'student' ? 'My learning' : role === 'teacher' ? 'Teacher workspace' : 'Administration'}</Typography><Typography variant="body2" fontWeight={750} noWrap>{currentLabel}</Typography></Box><Box sx={{ flex: 1 }} />
-        <Tooltip title="Notifications"><IconButton aria-label={`Notifications${unread ? `, ${unread} unread` : ''}`} onClick={event => { setNotificationAnchor(event.currentTarget); void loadNotifications(); }}><Badge badgeContent={unread} color="error"><NotificationsNoneOutlined /></Badge></IconButton></Tooltip>
-        <Tooltip title="Account menu"><IconButton aria-label="Account menu" onClick={event => setAccountAnchor(event.currentTarget)} sx={{ ml: .5 }}><Avatar sx={{ width: 34, height: 34, bgcolor: '#dce8ef', color: 'primary.dark', fontSize: 12, fontWeight: 750 }}>{initials}</Avatar></IconButton></Tooltip>
+        <Box sx={{ minWidth: 0 }}><Typography variant="caption" color="text.secondary">{role === 'student' ? 'My Learning' : role === 'teacher' ? 'Teacher Workspace' : 'Administration'}</Typography><Typography variant="body2" fontWeight={750} noWrap>{currentLabel}</Typography></Box><Box sx={{ flex: 1 }} />
+        <Tooltip title="Notifications"><IconButton sx={{ flexShrink: 0 }} aria-label={`Notifications${unread ? `, ${unread} unread` : ''}`} onClick={event => { setNotificationAnchor(event.currentTarget); void loadNotifications(); }}><Badge badgeContent={unread} color="error"><NotificationsNoneOutlined /></Badge></IconButton></Tooltip>
+        <Tooltip title="Account menu"><IconButton aria-label="Account menu" onClick={event => setAccountAnchor(event.currentTarget)} sx={{ ml: .5, flexShrink: 0 }}><Avatar sx={{ width: 34, height: 34, bgcolor: '#dce8ef', color: 'primary.dark', fontSize: 12, fontWeight: 750 }}>{initials}</Avatar></IconButton></Tooltip>
       </Box>
       <Box component="main"><Box sx={{ width: '100%', maxWidth: 1420, mx: 'auto', px: { xs: 2, sm: 3, lg: 4 }, pt: { xs: 2.5, sm: 3.5 }, pb: role === 'student' ? { xs: 64, sm: 66 } : { xs: 2.5, sm: 3.5 } }}>{children}</Box></Box>
     </Box>
@@ -86,8 +115,8 @@ export function AppShell({ children, route, onRoute, role, userName, userEmail, 
       {!notifications.length && <Typography variant="body2" color="text.secondary" sx={{ p: 3, textAlign: 'center' }}>No notifications yet.</Typography>}<Divider /><Button fullWidth onClick={() => { setNotificationAnchor(null); onRoute('notifications'); }} sx={{ borderRadius: 0 }}>View all notifications</Button>
     </Popover>
     <Menu anchorEl={accountAnchor} open={Boolean(accountAnchor)} onClose={() => setAccountAnchor(null)} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }} slotProps={{ paper: { sx: { width: 240, mt: 1 } } }}>
-      <Box sx={{ px: 2, py: 1.25 }}><Typography variant="body2" fontWeight={750} noWrap>{userName}</Typography><Typography variant="caption" color="text.secondary" noWrap>{userEmail}</Typography></Box><Divider /><MenuItem onClick={() => { setAccountAnchor(null); onRoute('profile'); }}><ManageAccountsOutlined fontSize="small" sx={{ mr: 1.25 }} />Account & security</MenuItem><MenuItem onClick={onLogout}><LogoutOutlined fontSize="small" sx={{ mr: 1.25 }} />Sign out</MenuItem>
+      <Box sx={{ px: 2, py: 1.25 }}><Typography variant="body2" fontWeight={750} noWrap>{userName}</Typography><Typography variant="caption" color="text.secondary" noWrap>{userEmail}</Typography></Box><Divider /><MenuItem onClick={() => { setAccountAnchor(null); onRoute('profile'); }}><ManageAccountsOutlined fontSize="small" sx={{ mr: 1.25 }} />Account & Security</MenuItem><MenuItem onClick={onLogout}><LogoutOutlined fontSize="small" sx={{ mr: 1.25 }} />Sign Out</MenuItem>
     </Menu>
     {role === 'student' && <StudentTalaChat />}
-  </Box></TalaChatContext.Provider>;
+  </Box></TalaChatContext.Provider></TeachingScopeContext.Provider></StudentScopeContext.Provider>;
 }

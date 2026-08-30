@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, CircularProgress, Divider, LinearProgress, Stack, Typography } from '@mui/material';
 import { ArrowForward, CheckCircle, PlayArrow } from '@mui/icons-material';
 import { PageHeader } from '../components/PageHeader';
@@ -6,12 +6,15 @@ import { Metric } from '../components/Metric';
 import { StatusChip } from '../components/StatusChip';
 import { api } from '../api/client';
 import type { StudentDashboardData } from '../api/types';
+import { useStudentScope } from '../components/StudentScopeContext';
 
 export function StudentOverview({ onContinue, onAssessments }: { onContinue: () => void; onAssessments: () => void }) {
   const [data, setData] = useState<StudentDashboardData | null>(null);
   const [error, setError] = useState('');
-  const load = () => { setError(''); api<StudentDashboardData>('/dashboard/student/').then(setData).catch(reason => setError(reason.message)); };
-  useEffect(load, []);
+  const scope = useStudentScope();
+  const load = useCallback(() => { if (!scope?.selectedSubjectId) return; setData(null); setError(''); api<StudentDashboardData>(`/dashboard/student/?subject=${scope.selectedSubjectId}`).then(setData).catch(reason => setError(reason.message)); }, [scope?.selectedSubjectId]);
+  useEffect(() => { load(); }, [load]);
+  if (scope && !scope.loading && !scope.selectedSubjectId) return <><PageHeader title="My Academic Recovery" /><Alert severity="info">No subject with assigned learning work is available yet.</Alert></>;
   if (!data && !error) return <Box sx={{ minHeight: 360, display: 'grid', placeItems: 'center' }}><CircularProgress size={28} /></Box>;
   if (error) return <><PageHeader title="My academic recovery" /><Alert severity="error" action={<Button onClick={load}>Retry</Button>}>{error}</Alert></>;
 

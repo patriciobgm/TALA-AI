@@ -17,7 +17,8 @@ export default function NotificationsScreen() {
       await api(`/notifications/${item.id}/read/`, { method: 'POST' });
       setItems(current => current?.map(found => found.id === item.id ? { ...found, is_read: true } : found) ?? []);
     }
-    if (item.action_url.includes('assessment')) router.push('/(tabs)/assessments');
+    if (item.action_url.includes('materials')) router.push('/(tabs)/materials');
+    else if (item.action_url.includes('assessment')) router.push('/(tabs)/assessments');
     else if (item.action_url.includes('recovery') || item.action_url.includes('resource')) router.push('/(tabs)/recovery');
   };
   const markAll = async () => { await api('/notifications/read-all/', { method: 'POST' }); setItems(current => current?.map(item => ({ ...item, is_read: true })) ?? []); };

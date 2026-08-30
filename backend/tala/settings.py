@@ -39,6 +39,8 @@ TEMPLATES = [{"BACKEND": "django.template.backends.django.DjangoTemplates", "DIR
 WSGI_APPLICATION = "tala.wsgi.application"
 
 DATABASES = {"default": dj_database_url.config(default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}", conn_max_age=60, conn_health_checks=True)}
+CACHE_URL = os.getenv("CACHE_URL", "")
+CACHES = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": CACHE_URL}} if CACHE_URL else {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "tala-local"}}
 AUTH_PASSWORD_VALIDATORS = [] if DEBUG else [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -63,6 +65,8 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework_simplejwt.authentication.JWTAuthentication"],
     "DEFAULT_PAGINATION_CLASS": "recovery.pagination.StandardResultsSetPagination",
     "PAGE_SIZE": 25,
+    "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle", "rest_framework.throttling.ScopedRateThrottle"],
+    "DEFAULT_THROTTLE_RATES": {"anon": "300/hour", "user": "3000/hour", "login": "60/minute"},
 }
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.getenv("JWT_ACCESS_MINUTES", "15"))),
@@ -76,6 +80,13 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "local-development")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-local")
 LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
+
+WHISPER_ENABLED = env_bool("WHISPER_ENABLED", False)
+WHISPER_CLI_PATH = os.getenv("WHISPER_CLI_PATH", "whisper-cli")
+WHISPER_MODEL_PATH = os.getenv("WHISPER_MODEL_PATH", "")
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
+WHISPER_TIMEOUT_SECONDS = int(os.getenv("WHISPER_TIMEOUT_SECONDS", "1800"))
+FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)

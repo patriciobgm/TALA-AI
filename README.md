@@ -9,17 +9,25 @@ The LLM is an optional tutor. Assessment scoring, mastery, progression, deadline
 - JWT authentication and role-scoped student, teacher, and administrator workspaces
 - normalized personal, student/employee, emergency-contact, and guardian profile records with controlled field ownership
 - self-service profile photos/contact details, password recovery, password changes, and authenticator-app MFA
-- administrator-managed students, teachers, administrators, classes, assignments, subjects, competencies, and academic defaults
+- Grade 11/12 and section-grouped student management, one-grade-per-subject curriculum, and superadministrator-controlled administrator access
 - provider-neutral service diagnostics and administrative audit history
 - URL-backed responsive web navigation with a persistent left sidebar
-- diagnostic and mastery assessments with server-side scoring
+- diagnostic, mastery, and consent-gated remedial exams with server-side scoring
 - competency results and ordered recovery-plan generation
 - actual practice questions, answer feedback, passing thresholds, and persisted completion
-- teacher exam/module/video submission with separate administrator review and publication
+- teacher exam/module/video submission with administrator review notifications and a focused governance workflow
+- class-based module/video assignments with student notifications, a zoomable protected PDF reader, resumable video playback, extracted module quizzes, assignment-grounded Ask TALA support, and completion tracking
 - protected, short-lived learning-material links instead of a public media folder
 - in-app, email-ready, and Expo push-ready notifications and reminders
-- teacher learner profiles, progress alerts, and intervention records
+- teacher learner profiles, progress alerts, actionable AI recommendations, and auditable intervention records
+- teacher-authored questions for draft assessments alongside document-extracted questions
 - configurable local Llama/OpenAI-compatible tutor grounded in approved resources
+- chunk-level approved-source retrieval with numbered citations and prompt-injection boundaries
+- learner competency evidence used for tutor pacing, teacher-visible learning timelines, and on-demand AI instructional recommendations
+- checksummed research-evidence snapshots covering competency improvement, recovery adherence, recommendation outcomes, TALA quality, usability, and consent history
+- human TALA grounding/hallucination/answer-leakage review and anonymous task-based usability observations
+- grade-derived teacher class access, separate user/security and class-management workspaces, and subject-specific competency pages
+- structured tutor modes, bounded conversation memory, grounding status, latency, and response feedback records
 - Expo/React Native student application
 - PostgreSQL, Redis, Celery, Gunicorn, and Nginx Docker deployment baseline
 
@@ -176,7 +184,7 @@ docker compose stop
 | Student | `student@tala.edu.ph` | `demo-password` |
 | Teacher | `teacher@tala.edu.ph` | `demo-password` |
 | TALA administrator | `admin@tala.edu.ph` | `demo-password` |
-| Django technical superuser | `superadmin@tala.edu.ph` | `demo-password` |
+| TALA superadministrator | `superadmin@tala.edu.ph` | `demo-password` |
 
 Additional teacher accounts use the same password: `ramon.mendoza@tala.edu.ph` and `liza.navarro@tala.edu.ph`.
 
@@ -194,7 +202,7 @@ Additional student accounts also use `demo-password`:
 
 The seeded students intentionally have different diagnostic scores and recovery-plan completion levels so reports, intervention states, mastery locking, and progress views can be tested.
 
-These accounts are for local testing only. Use `admin@tala.edu.ph` for the TALA product UI. The seeded technical superuser is deliberately restricted to Django Admin at `/admin/`; it is not a second product administrator role. Change or remove every demo credential before deployment. Running `seed_demo` restores the documented development passwords.
+These accounts are for local testing only. The administrator manages learners, teachers, classes, curriculum, and operations but cannot view or manage administrator accounts. The superadministrator can sign in to the product UI and is the only role allowed to manage administrator access; it can also use Django Admin at `/admin/`. Change or remove every demo credential before deployment. Running `seed_demo` restores the documented development passwords.
 
 The academic dataset contains Grade 11 Rizal and Bonifacio, Grade 12 Mabini, and five Senior High School subjects: General Mathematics, English for Academic and Professional Purposes, Earth and Life Science, Oral Communication in Context, and Personal Development. Each subject has four competencies. Teachers have different class and subject assignments so role scoping can be verified.
 
@@ -235,9 +243,28 @@ python manage.py runserver
 
 Supported provider identifiers are `llama_cpp`, `ollama`, `openai_compatible`, and `openai`. Switching providers does not require a web or mobile change. Never put provider credentials in a `VITE_` or `EXPO_PUBLIC_` variable.
 
+## Grounded tutoring architecture
+
+Ask TALA is more than an unrestricted chat completion. For every request, the backend:
+
+1. verifies that the recovery plan belongs to the authenticated student;
+2. resolves the current activity, practice question, and selected answer;
+3. retrieves only approved content mapped to the plan's competency;
+4. ranks bounded content chunks and assigns stable source numbers;
+5. summarizes recent deterministic assessment and practice evidence for pacing;
+6. includes only the six most recent conversation messages;
+7. instructs the model to treat uploaded excerpts as untrusted reference text;
+8. prevents the model from changing grades, completion, or mastery;
+9. stores provider, model, latency, grounding status, and source citations; and
+10. accepts helpful/not-helpful feedback for evaluation.
+
+Available tutor modes are `explain`, `example`, `hint`, `check`, `simplify`, `reasoning`, and `practice`. Web and mobile expose the most common modes as concise actions.
+
+The current retrieval ranker is deterministic and provider-neutral, which keeps SQLite development and offline testing simple. The next retrieval upgrade can add a configurable local embedding provider and PostgreSQL/pgvector without changing the tutor API or its safety boundary. Embedding quality must be evaluated against the existing grounding tests before it replaces or augments lexical ranking.
+
 ## Content import workflow
 
-Sign in as a teacher and open **Content imports** from the left navigation. Teachers submit source material but cannot publish it. Sign in as the product administrator to review the shared governance queue, correct extracted questions, and publish approved material.
+Sign in as a teacher and open **Content Imports** from the left navigation. Teachers submit source material and can correct extracted questions while the upload is awaiting review, but cannot publish it. Sign in as the product administrator to review the grouped governance queue, compare extracted questions with the original PDF, and publish approved material.
 
 ### Exam documents
 
@@ -264,9 +291,71 @@ Publishing never automatically makes an assessment available to students. Admini
 ### Modules and videos
 
 1. Select **Module** for PDF/DOCX or **Video** for MP4/WebM/MOV.
-2. Assign the material to a competency and add a concise description.
-3. An administrator reviews and publishes it.
-4. The approved resource becomes available in matching recovery activities and can be opened or played by the student.
+2. Assign the material to a competency, select one or more classes, and add a concise description.
+3. Administrators receive an in-app review notification and inspect the submission in the focused review dialog.
+4. The administrator confirms the class assignment and publishes it.
+5. The review screen opens on the extracted quiz only. Use **Original Document** to compare it with the protected PDF preview; raw extracted page text is not presented as an editable form.
+6. The uploader or administrator verifies the question, choices, answer, and competency before publication. The administrator retains approval authority.
+7. Assigned students receive a notification and open the material from **Learning Materials** on web or mobile. The uploader is identified, PDF modules have zoom controls, and video position is saved automatically so students can continue across sessions and devices.
+8. If an approved module quiz exists, it is presented separately from the document. The learner confirms readiness, then must pass it before the module is completed. Ask TALA can explain the current concept or provide a hint from approved module content, but is instructed not to reveal or confirm an answer. The system records each attempt and completion.
+
+### Local Whisper video transcription
+
+The backend now supports a configurable local `whisper.cpp` pipeline. It uses FFmpeg to extract 16 kHz mono WAV audio, runs `whisper-cli`, retains the transcript for review, and detects explicitly spoken, answer-keyed questions. It does not invent quiz questions when the transcript contains only lesson narration.
+
+Install the Homebrew packages and download an English base model:
+
+```bash
+brew install whisper-cpp ffmpeg
+mkdir -p "$HOME/Models"
+curl --location --output "$HOME/Models/ggml-base.en.bin" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+command -v whisper-cli
+command -v ffmpeg
+```
+
+Configure `backend/.env` using absolute paths:
+
+```dotenv
+WHISPER_ENABLED=true
+WHISPER_CLI_PATH=/opt/homebrew/bin/whisper-cli
+WHISPER_MODEL_PATH=/Users/YOUR_USERNAME/Models/ggml-base.en.bin
+WHISPER_LANGUAGE=en
+WHISPER_TIMEOUT_SECONDS=1800
+FFMPEG_PATH=/opt/homebrew/bin/ffmpeg
+```
+
+Restart Django and open **System Settings → Service Health**. The `transcription` service must report `configured`. Video processing is compute-intensive; the production deployment should run it through the configured Celery worker rather than a web request before enabling large-scale uploads.
+
+## Teacher interventions and AI insights
+
+An intervention is an auditable record of a teacher’s planned or completed follow-up—guided practice, supporting material, reassessment, monitoring, or parent contact. Recording it does not silently assign content, schedule an assessment, or change a grade. Those remain explicit workflows.
+
+From a learner profile, **Generate Insight** summarizes recent assessment and practice evidence and proposes a concrete next action. **Create Intervention Record** copies that recommendation into a teacher-reviewed record. Teachers can edit the action and note before saving, so AI remains decision support rather than an autonomous academic decision-maker.
+
+Approved recovery materials are also ranked by the versioned `evidence-rank-v1` algorithm. It uses the learner's recent competency evidence, practice history, the resource type and difficulty, and embedded checks for understanding. Teachers see the rationale and confidence, then explicitly add or dismiss the material. Accepted recommendations are inserted before the mastery check, recorded as an intervention, audited, and shown to the learner with a plain-language reason. See [the defensibility and completion audit](docs/DEFENSIBILITY_AUDIT.md) for the algorithm boundaries, evaluation requirements, and remaining deployment work.
+
+To author an assessment without an uploaded document, open **Assessments** and choose **Add Assessment**. Enter its subject, type, assigned classes, due date, and instructions. Open the saved draft to add or edit questions. Active assessments must first be returned to draft to prevent the live question set from changing during learner attempts.
+
+### Remedial exam and parent consent
+
+Recovery lessons and mastery checks remain the normal learning workflow. A **Remedial exam** is a separate assessment type used after the learner completes the applicable recovery activities.
+
+1. Create or import an exam and select **Remedial exam** as its assessment type.
+2. Assign and activate it for the appropriate class.
+3. Open the learner profile after required recovery activities are complete and select **Request parent consent**.
+4. The system emails the recorded parent/legal guardian a signed response link using the expiry configured in **System Settings → Privacy & Consent**.
+5. The guardian reviews the learner, exam, consent statement, policy version, and expiry, then approves or declines using the verified email link and electronic signature. If the school also uses a signed paper form, the guardian may attach a PDF/JPG/PNG copy from that page. Approval can be withdrawn with a recorded reason before the exam begins.
+6. The remedial exam stays locked unless the current consent status is **Approved**. Consent transitions and teacher AI-insight generation are written to the audit log.
+
+The default school policy version is deliberately `DRAFT-1`. Administrators must not mark it school-approved until the institution validates the exact wording, identity-verification process, escalation path, and retention rules.
+
+### Research and defense evidence
+
+Administrators can open **Research Evidence** to review live calculated outcomes, record anonymous student/teacher usability observations, human-review TALA responses, export the current evidence JSON, and freeze a named dataset version. A frozen snapshot stores its metrics, record counts, recommendation algorithm version, creator, timestamp, and SHA-256 checksum and cannot be silently edited.
+
+Use [the research evaluation protocol](docs/RESEARCH_EVALUATION_PROTOCOL.md) before formal data collection. The interface creates traceable evidence; it does not replace research-adviser approval, school authorization, a privacy-impact assessment, or an appropriate statistical design.
+
+Class assignments remain editable after publication from **Content Governance**. Removing every class keeps the approved resource in the governed library while removing it from student Learning Materials.
 
 Module and exam files are limited to 25 MB; video files are limited to 500 MB. Files are checksummed and served through expiring signed links. Production deployments should add malware scanning and private object storage before accepting untrusted public uploads.
 
@@ -277,22 +366,23 @@ Module and exam files are limited to 25 MB; video files are limited to 500 MB. F
 1. Sign in as `teacher@tala.edu.ph`.
 2. Open **Content imports** and upload an exam or learning material.
 3. Confirm extraction reaches **Needs review**; malformed or scan-only documents should show a recoverable error.
-4. Review and publish the import.
+4. For a module or video, confirm the assigned classes, then review and publish the import.
 5. For an exam, open **Assessments**, inspect the draft, and activate it.
-6. Confirm a student notification is created.
+6. Confirm the administrator review notification and, after publication, the assigned-student notifications are created.
 
 ### Student: complete the learning loop
 
 1. Sign in as `student@tala.edu.ph`.
 2. Open **My progress**, then **Recovery plan**.
-3. Select the first unlocked activity.
-4. Read the lesson or open/play the attached teacher material.
-5. Answer every practice question and select **Check answers**.
-6. Verify an incorrect result shows feedback and does not complete the activity.
-7. Reach the passing score and verify the next activity unlocks.
-8. Optionally use **Ask TALA**; if Llama is offline, only tutoring should be unavailable.
-9. Complete all required activities, open **Assessments**, and submit the mastery assessment.
-10. Refresh any page, including `/imports`; the current URL and page should remain selected.
+3. Open **Learning Materials** and verify PDF zoom, resumable video, and any extracted module quiz.
+4. Select the first unlocked recovery activity.
+5. Read the lesson or open/play the attached teacher material.
+6. Answer every practice question and select **Check answers**.
+7. Verify an incorrect result shows feedback and does not complete the activity.
+8. Reach the passing score and verify the next activity unlocks.
+9. Optionally use **Ask TALA**; if Llama is offline, only tutoring should be unavailable.
+10. Complete all required activities, open **Assessments**, and submit the mastery assessment.
+11. Refresh any page, including `/imports`; the current URL and page should remain selected.
 
 ### Teacher: verify learner progress
 
@@ -304,11 +394,13 @@ Module and exam files are limited to 25 MB; video files are limited to 500 MB. F
 ### Administrator
 
 1. Sign in as `superadmin@tala.edu.ph` or `admin@tala.edu.ph`.
-2. Open **Users & classes**. Create or edit a class, assign students, and give teachers the appropriate classes and subjects.
-3. Manage a user to activate/deactivate access, send a password-reset link, or require a password change.
-4. Open **Curriculum**. Create/edit/archive subjects and competencies and verify mastery thresholds.
-5. Open **Content governance** to review uploads across all subjects.
-6. Open **System settings**, run service checks, update non-secret academic defaults, and review audit history.
+2. Open **Users & Security** to manage student, teacher, and administrator identities. Student placement is grade-first.
+3. Open **Class Management** to manage Grade 11 or Grade 12 sections separately. Teacher class access is automatically derived from the grade levels of assigned subjects.
+4. Manage a user to activate/deactivate access, send a password-reset link, or require a password change.
+5. Open **Subjects**, then open a subject to manage its competencies on a separate page.
+6. Open **Content Governance** to review uploads across all subjects.
+7. Open **Research Evidence**, record study observations/quality reviews, export JSON, and freeze a versioned snapshot.
+8. Open **System Settings**, run service checks, configure privacy/consent governance, update academic defaults, and review audit history.
 7. Open **Account** in the lower sidebar to update the profile, change the password, or configure authenticator-app MFA.
 8. Use `/admin/` only when framework-level recovery is required; normal administration should use the product UI.
 
@@ -410,13 +502,29 @@ GET/POST /api/content-imports/            Upload and list imports
 PATCH    /api/content-imports/{id}/        Review extracted content
 POST     /api/content-imports/{id}/process/
 POST     /api/content-imports/{id}/publish/
+POST     /api/content-imports/{id}/assign/
 POST     /api/content-imports/{id}/reject/
+
+GET      /api/learning-assignments/
+POST     /api/learning-assignments/{id}/open/
+POST     /api/learning-assignments/{id}/progress/
+POST     /api/learning-assignments/{id}/submit-quiz/
+POST     /api/learning-assignments/{id}/complete/
 
 GET/POST /api/assessments/
 GET      /api/assessments/{id}/start/
 POST     /api/assessments/{id}/submit/
+POST     /api/assessments/{id}/request-consent/
+GET/POST /api/remedial-consent/?token=...
 GET      /api/recovery-plans/
 POST     /api/recovery-plans/{plan}/activities/{activity}/complete/
+POST     /api/tutor/learners/{student}/insight/
+
+GET      /api/research/evidence/
+GET/POST /api/research/snapshots/
+GET/POST /api/research/usability-evaluations/
+GET/POST /api/research/ai-evaluations/
+GET/POST/PATCH /api/privacy/requests/
 
 GET      /api/notifications/
 POST     /api/notifications/{id}/read/

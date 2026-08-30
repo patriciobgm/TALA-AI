@@ -4,8 +4,10 @@ from django.utils import timezone
 
 from datetime import timedelta
 
-from recovery.models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, Competency, CompetencyResult, EmployeeProfile, LearningResource, PracticeQuestion, Question, RecoveryActivity, RecoveryPlan, StudentAnswer, StudentProfile, Subject, UserProfile
+from recovery.models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, Competency, CompetencyResult, EmployeeProfile, GuardianContact, LearningResource, PracticeQuestion, Question, RecoveryActivity, RecoveryPlan, StudentAnswer, StudentProfile, Subject, UserProfile
 from recovery.services import calculate_competency_results, create_recovery_plan
+from recovery.resource_index import index_learning_resource
+from recovery.learning_intelligence import rank_learning_resources
 
 class Command(BaseCommand):
     help = "Create an idempotent academic-recovery dataset for local development."
@@ -74,7 +76,7 @@ class Command(BaseCommand):
         }
         subjects = {}
         for code, (name, competency_rows) in subject_catalog.items():
-            current_subject, _ = Subject.objects.update_or_create(code=code, defaults={"name": name, "is_active": True})
+            current_subject, _ = Subject.objects.update_or_create(code=code, defaults={"name": name, "grade_level": 11, "is_active": True})
             subjects[code] = current_subject
             for competency_code, competency_title in competency_rows:
                 Competency.objects.update_or_create(subject=current_subject, code=competency_code, defaults={"title": competency_title, "mastery_threshold": 75, "is_active": True})
@@ -111,6 +113,7 @@ class Command(BaseCommand):
         for title, content, kind, mapped_competency, prompt, choices, correct, explanation in resource_data:
             resource, _ = LearningResource.objects.update_or_create(title=title, defaults={"resource_type": kind, "difficulty": "foundation", "content": content, "is_approved": True})
             resource.competencies.set([mapped_competency])
+            index_learning_resource(resource)
             PracticeQuestion.objects.update_or_create(resource=resource, position=1, defaults={"prompt": prompt, "question_type": PracticeQuestion.QuestionType.MULTIPLE_CHOICE, "options": choices, "correct_answer": correct, "explanation": explanation})
 
         assessment, _ = Assessment.objects.update_or_create(title="Fractions diagnostic assessment", defaults={"subject": subject, "kind": Assessment.Kind.PRE, "is_active": True, "created_by": teacher})
@@ -125,7 +128,7 @@ class Command(BaseCommand):
             Question.objects.update_or_create(assessment=assessment, competency=competency, prompt=prompt, defaults={"question_type": Question.QuestionType.TRUE_FALSE if len(choices) == 2 else Question.QuestionType.MULTIPLE_CHOICE, "options": choices, "correct_answer": correct})
 
         post_assessment, _ = Assessment.objects.update_or_create(title="Fractions mastery assessment", defaults={"subject": subject, "kind": Assessment.Kind.POST, "is_active": True, "created_by": teacher})
-        post_assessment.assigned_classes.add(academic_class)
+        post_assessment.assigned_classes.set([academic_class, bonifacio_class, mabini_class])
         post_questions = [
             (competencies[2], "What is 2/3 + 1/4?", ["3/7", "11/12", "3/12", "8/12"], "11/12"),
             (competencies[2], "What is 1/2 + 2/5?", ["3/7", "9/10", "3/10", "7/10"], "9/10"),
@@ -134,6 +137,12 @@ class Command(BaseCommand):
         ]
         for competency, prompt, choices, correct in post_questions:
             Question.objects.update_or_create(assessment=post_assessment, competency=competency, prompt=prompt, defaults={"question_type": Question.QuestionType.TRUE_FALSE if len(choices) == 2 else Question.QuestionType.MULTIPLE_CHOICE, "options": choices, "correct_answer": correct})
+
+        remedial_assessment, _ = Assessment.objects.update_or_create(title="Fractions remedial exam", defaults={"subject": subject, "kind": Assessment.Kind.REMEDIAL, "instructions": "Complete this exam only after the recovery plan and verified parent/legal-guardian consent.", "is_active": True, "created_by": teacher})
+        remedial_assessment.assigned_classes.set([academic_class, bonifacio_class, mabini_class])
+        for competency, prompt, choices, correct in post_questions:
+            remedial_prompt = f"Remedial: {prompt}"
+            Question.objects.update_or_create(assessment=remedial_assessment, competency=competency, prompt=remedial_prompt, defaults={"question_type": Question.QuestionType.TRUE_FALSE if len(choices) == 2 else Question.QuestionType.MULTIPLE_CHOICE, "options": choices, "correct_answer": correct})
 
         if not AssessmentAttempt.objects.filter(assessment=assessment, student=student, submitted_at__isnull=False).exists():
             attempt = AssessmentAttempt.objects.create(assessment=assessment, student=student, submitted_at=timezone.now(), score=50)
@@ -145,13 +154,16 @@ class Command(BaseCommand):
                 if result.status == "remediation":
                     create_recovery_plan(student, result)
         for result in CompetencyResult.objects.filter(attempt__assessment=assessment, attempt__student=student, status=CompetencyResult.Status.REMEDIATION).select_related("competency"):
-            plan, _ = RecoveryPlan.objects.get_or_create(student=student, competency=result.competency, status="active", defaults={"baseline_score": result.score})
+            plan = create_recovery_plan(student, result)
+            if not plan or plan.status != "active":
+                continue
             if not plan.activities.filter(completed_at__isnull=False).exists():
                 plan.activities.all().delete()
-                mapped_resources = list(result.competency.resources.filter(is_approved=True).order_by("difficulty", "id")[:3])
-                for position, resource in enumerate(mapped_resources, start=1):
-                    RecoveryActivity.objects.create(plan=plan, resource=resource, title=resource.title, position=position, due_at=timezone.now() + timedelta(days=position * 2))
-                RecoveryActivity.objects.create(plan=plan, title="Mastery check", position=len(mapped_resources) + 1, due_at=timezone.now() + timedelta(days=(len(mapped_resources) + 1) * 2))
+                recommendations = rank_learning_resources(student, result.competency, limit=3)
+                for position, recommendation in enumerate(recommendations, start=1):
+                    resource = recommendation["resource"]
+                    RecoveryActivity.objects.create(plan=plan, resource=resource, title=resource.title, position=position, due_at=timezone.now() + timedelta(days=position * 2), recommendation_reason=recommendation["reason"], recommendation_metadata={"score": recommendation["score"], "confidence": recommendation["confidence"], **recommendation["signals"]})
+                RecoveryActivity.objects.create(plan=plan, title="Mastery check", position=len(recommendations) + 1, due_at=timezone.now() + timedelta(days=(len(recommendations) + 1) * 2))
             for activity in plan.activities.filter(due_at__isnull=True):
                 activity.due_at = timezone.now() + timedelta(days=activity.position * 2)
                 activity.save(update_fields=["due_at"])
@@ -210,6 +222,7 @@ class Command(BaseCommand):
 
         for index, profile in enumerate(UserProfile.objects.filter(role=UserProfile.Role.STUDENT).order_by("user_id"), start=1):
             StudentProfile.objects.update_or_create(profile=profile, defaults={"student_number": f"2026-{index:04d}", "learner_reference_number": f"100000000{index:03d}"})
+            GuardianContact.objects.update_or_create(profile=profile, name=f"Parent of {profile.user.first_name or 'Learner'}", defaults={"relationship": "Parent", "phone": f"0917000{index:04d}", "email": f"guardian{index}@example.com", "receives_progress_updates": True})
         for index, profile in enumerate(UserProfile.objects.exclude(role=UserProfile.Role.STUDENT).order_by("user_id"), start=1):
             EmployeeProfile.objects.update_or_create(profile=profile, defaults={"employee_id": f"EMP-2026-{index:03d}"})
-        self.stdout.write(self.style.SUCCESS("Demo data ready: 2 admins, 1 technical superuser, 3 teachers, 10 students, 3 classes, 5 subjects, and 20 competencies. Shared password: demo-password"))
+        self.stdout.write(self.style.SUCCESS("Demo data ready: 2 administrators (including 1 superadministrator), 3 teachers, 10 students, 3 classes, 5 subjects, and 20 competencies. Shared password: demo-password"))

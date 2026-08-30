@@ -7,8 +7,8 @@ import type { Activity, Plan, PracticeFeedback } from '@/lib/types';
 import { colors, radius, spacing } from '@/constants/tokens';
 
 function VideoMaterial({ uri }: { uri: string }) {
-  const player = useVideoPlayer(uri);
-  return <VideoView player={player} style={styles.video} fullscreenOptions={{ enable: true }} allowsPictureInPicture />;
+  const player = useVideoPlayer({ uri, contentType: 'progressive' });
+  return <VideoView player={player} style={styles.video} nativeControls contentFit="contain" fullscreenOptions={{ enable: true }} allowsPictureInPicture />;
 }
 
 export default function ActivityScreen() {

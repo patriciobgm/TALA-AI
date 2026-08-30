@@ -5,8 +5,10 @@ from urllib.parse import urlencode
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from .models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, EmergencyContact, EmployeeProfile, GuardianContact, Intervention, LearningResource, Notification, NotificationPreference, PracticeQuestion, Question, RecoveryActivity, RecoveryPlan, StudentProfile, Subject, SystemConfiguration, UserProfile
+from .models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, EmergencyContact, EmployeeProfile, GuardianContact, Intervention, LearnerCompetencyEvidence, LearningAssignment, LearningAssignmentProgress, LearningResource, Notification, NotificationPreference, PracticeQuestion, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, StudentProfile, Subject, SystemConfiguration, UserProfile
 from .secure_media import create_media_token
+from .permissions import role_for
+from .assignment_rules import sync_teacher_classes
 
 
 def protected_media_url(request, kind, object_id, path):
@@ -22,12 +24,20 @@ class AcademicClassSerializer(serializers.ModelSerializer):
     class Meta:
         model = AcademicClass
         fields = ["id", "name", "grade_level", "school_year", "is_active", "label", "student_count", "teacher_count"]
+    def validate_grade_level(self, value):
+        if value not in {11, 12}:
+            raise serializers.ValidationError("TALA-AI currently supports Grade 11 and Grade 12 only.")
+        return value
 
 class SubjectSerializer(serializers.ModelSerializer):
     competency_count = serializers.IntegerField(source="competencies.count", read_only=True)
     class Meta:
         model = Subject
-        fields = ["id", "name", "code", "is_active", "competency_count"]
+        fields = ["id", "name", "code", "grade_level", "is_active", "competency_count"]
+    def validate_grade_level(self, value):
+        if value not in {11, 12}:
+            raise serializers.ValidationError("Choose Grade 11 or Grade 12.")
+        return value
 
 class UserAdminSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
@@ -66,6 +76,8 @@ class UserAdminSerializer(serializers.Serializer):
     def validate(self, attrs):
         role = attrs.get("role", getattr(getattr(self.instance, "tala_profile", None), "role", None))
         request = self.context.get("request")
+        if role == UserProfile.Role.ADMIN and request and not request.user.is_superuser:
+            raise serializers.ValidationError({"role": "Only a superadministrator can create or manage administrator access."})
         if self.instance and request and request.user == self.instance:
             if attrs.get("is_active") is False:
                 raise serializers.ValidationError({"is_active": "You cannot deactivate your own account."})
@@ -96,8 +108,13 @@ class UserAdminSerializer(serializers.Serializer):
             if "employee_id" in validated_data:
                 details.employee_id = validated_data["employee_id"] or None
             details.save()
-        profile.assigned_classes.set(validated_data.get("assigned_classes", []) if profile.role == UserProfile.Role.TEACHER else [])
-        profile.assigned_subjects.set(validated_data.get("assigned_subjects", []) if profile.role == UserProfile.Role.TEACHER else [])
+        if profile.role == UserProfile.Role.TEACHER:
+            if "assigned_subjects" in validated_data:
+                profile.assigned_subjects.set(validated_data["assigned_subjects"])
+            sync_teacher_classes(profile)
+        else:
+            profile.assigned_classes.clear()
+            profile.assigned_subjects.clear()
         user.is_active = profile.is_active
         user.save(update_fields=["is_active"])
 
@@ -140,7 +157,8 @@ class UserAdminSerializer(serializers.Serializer):
             assignment = "System administration"
         student_details = getattr(profile, "student_details", None)
         employee_details = getattr(profile, "employee_details", None)
-        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "academic_class": profile.academic_class_id, "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
+        academic_class = profile.academic_class
+        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else None, "section": academic_class.name if academic_class else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
 
 class CompetencySerializer(serializers.ModelSerializer):
     class Meta:
@@ -216,7 +234,7 @@ class ProfileSerializer(serializers.Serializer):
 class SystemConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemConfiguration
-        fields = ["school_year", "default_mastery_threshold", "reminder_hour", "reminder_days_before", "updated_at"]
+        fields = ["school_year", "default_mastery_threshold", "reminder_hour", "reminder_days_before", "consent_policy_version", "consent_policy_approved", "consent_expiry_days", "minor_data_retention_days", "privacy_contact_email", "updated_at"]
         read_only_fields = ["updated_at"]
 
     def validate_default_mastery_threshold(self, value):
@@ -227,6 +245,16 @@ class SystemConfigurationSerializer(serializers.ModelSerializer):
     def validate_reminder_hour(self, value):
         if not 0 <= value <= 23:
             raise serializers.ValidationError("Enter an hour from 0 to 23.")
+        return value
+
+    def validate_consent_expiry_days(self, value):
+        if not 1 <= value <= 90:
+            raise serializers.ValidationError("Choose an expiry period from 1 to 90 days.")
+        return value
+
+    def validate_minor_data_retention_days(self, value):
+        if not 30 <= value <= 3650:
+            raise serializers.ValidationError("Choose a retention period from 30 days to 10 years.")
         return value
 
 
@@ -265,15 +293,108 @@ class ResourceSerializer(serializers.ModelSerializer):
         fields = ["id", "title", "resource_type", "difficulty", "content", "file_url", "external_url", "original_filename", "mime_type", "passing_score", "competencies", "practice_questions", "is_approved", "created_at"]
         read_only_fields = ["original_filename", "mime_type", "created_at"]
 
+class LearningAssignmentSerializer(serializers.ModelSerializer):
+    resource_title = serializers.CharField(source="resource.title", read_only=True)
+    resource_type = serializers.CharField(source="resource.resource_type", read_only=True)
+    resource_content = serializers.CharField(source="resource.content", read_only=True)
+    original_filename = serializers.CharField(source="resource.original_filename", read_only=True)
+    competency = serializers.SerializerMethodField()
+    file_url = serializers.SerializerMethodField()
+    class_labels = serializers.SerializerMethodField()
+    opened_at = serializers.SerializerMethodField()
+    completed_at = serializers.SerializerMethodField()
+    playback_position_seconds = serializers.SerializerMethodField()
+    duration_seconds = serializers.SerializerMethodField()
+    progress_percent = serializers.SerializerMethodField()
+    practice_questions = serializers.SerializerMethodField()
+    quiz_required = serializers.SerializerMethodField()
+    quiz_passed = serializers.SerializerMethodField()
+    latest_quiz_score = serializers.SerializerMethodField()
+    uploaded_by_name = serializers.SerializerMethodField()
+
+    def _progress(self, assignment):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+        return next((item for item in assignment.progress_records.all() if item.student_id == request.user.id), None)
+
+    def get_competency(self, assignment):
+        competency = assignment.resource.competencies.first()
+        return {"id": competency.id, "code": competency.code, "title": competency.title} if competency else None
+
+    def get_file_url(self, assignment):
+        if not assignment.resource.file:
+            return ""
+        return protected_media_url(self.context.get("request"), "resource", assignment.resource_id, f"/api/resources/{assignment.resource_id}/file/")
+
+    def get_class_labels(self, assignment):
+        return [str(item) for item in assignment.assigned_classes.all()]
+
+    def get_uploaded_by_name(self, assignment):
+        source_import = assignment.resource.source_imports.first()
+        uploader = source_import.uploaded_by if source_import else assignment.resource.uploaded_by
+        return (uploader.get_full_name() or uploader.email) if uploader else "School faculty"
+
+    def get_opened_at(self, assignment):
+        progress = self._progress(assignment)
+        return progress.opened_at if progress else None
+
+    def get_completed_at(self, assignment):
+        progress = self._progress(assignment)
+        return progress.completed_at if progress else None
+
+    def get_playback_position_seconds(self, assignment):
+        progress = self._progress(assignment)
+        return progress.playback_position_seconds if progress else 0
+
+    def get_duration_seconds(self, assignment):
+        progress = self._progress(assignment)
+        return progress.duration_seconds if progress else 0
+
+    def get_progress_percent(self, assignment):
+        progress = self._progress(assignment)
+        if not progress or not progress.duration_seconds:
+            return 100 if progress and progress.completed_at else 0
+        return min(100, round(progress.playback_position_seconds / progress.duration_seconds * 100))
+
+    def get_practice_questions(self, assignment):
+        return PracticeQuestionPublicSerializer(assignment.resource.practice_questions.all(), many=True).data
+
+    def get_quiz_required(self, assignment):
+        return assignment.resource.practice_questions.exists()
+
+    def _latest_quiz_attempt(self, assignment):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+        return next((item for item in assignment.quiz_attempts.all() if item.student_id == request.user.id), None)
+
+    def get_quiz_passed(self, assignment):
+        progress = self._progress(assignment)
+        if progress and progress.completed_at:
+            return True
+        attempt = self._latest_quiz_attempt(assignment)
+        return bool(attempt and attempt.passed)
+
+    def get_latest_quiz_score(self, assignment):
+        attempt = self._latest_quiz_attempt(assignment)
+        return attempt.score if attempt else None
+
+    class Meta:
+        model = LearningAssignment
+        fields = ["id", "resource", "resource_title", "resource_type", "resource_content", "original_filename", "competency", "file_url", "uploaded_by_name", "assigned_classes", "class_labels", "instructions", "due_at", "is_active", "opened_at", "completed_at", "playback_position_seconds", "duration_seconds", "progress_percent", "practice_questions", "quiz_required", "quiz_passed", "latest_quiz_score", "created_at"]
+        read_only_fields = fields
+
 class AssessmentSerializer(serializers.ModelSerializer):
     question_count = serializers.IntegerField(source="questions.count", read_only=True)
     competency_ids = serializers.SerializerMethodField()
     available = serializers.SerializerMethodField()
     availability_reason = serializers.SerializerMethodField()
     remaining_activities = serializers.SerializerMethodField()
+    consent_status = serializers.SerializerMethodField()
     def _remaining_activities(self, assessment):
         request = self.context.get("request")
-        if not request or not request.user.is_authenticated or assessment.kind != Assessment.Kind.POST:
+        if not request or not request.user.is_authenticated or assessment.kind not in {Assessment.Kind.POST, Assessment.Kind.REMEDIAL} or role_for(request.user) != UserProfile.Role.STUDENT:
             return 0
         competency_ids = assessment.questions.values_list("competency_id", flat=True)
         return RecoveryActivity.objects.filter(
@@ -285,9 +406,10 @@ class AssessmentSerializer(serializers.ModelSerializer):
         ).count()
     def get_available(self, assessment):
         request = self.context.get("request")
-        if not request or not request.user.is_authenticated or assessment.kind == Assessment.Kind.PRE:
+        if not request or not request.user.is_authenticated or assessment.kind == Assessment.Kind.PRE or role_for(request.user) != UserProfile.Role.STUDENT:
             return assessment.is_active
-        return assessment.is_active and self._remaining_activities(assessment) == 0
+        consent_ready = assessment.kind != Assessment.Kind.REMEDIAL or assessment.remedial_consents.filter(student=request.user, status=RemedialExamConsent.Status.APPROVED).exists()
+        return assessment.is_active and self._remaining_activities(assessment) == 0 and consent_ready
     def get_remaining_activities(self, assessment):
         return self._remaining_activities(assessment)
     def get_availability_reason(self, assessment):
@@ -296,8 +418,27 @@ class AssessmentSerializer(serializers.ModelSerializer):
         remaining = self._remaining_activities(assessment)
         if remaining:
             noun = "activity" if remaining == 1 else "activities"
-            return f"Complete {remaining} remaining recovery {noun} to unlock this mastery assessment."
+            return f"Complete {remaining} remaining recovery {noun} to unlock this assessment."
+        request = self.context.get("request")
+        if assessment.kind == Assessment.Kind.REMEDIAL and request and role_for(request.user) == UserProfile.Role.STUDENT:
+            consent = assessment.remedial_consents.filter(student=request.user).first()
+            if not consent:
+                return "Parent or legal-guardian consent has not yet been requested for this remedial exam."
+            if consent.status == RemedialExamConsent.Status.REQUESTED:
+                return "Waiting for your parent or legal guardian to respond to the remedial-exam consent request."
+            if consent.status == RemedialExamConsent.Status.DECLINED:
+                return "Your parent or legal guardian declined consent for this remedial exam. Contact your teacher for the next step."
+            if consent.status == RemedialExamConsent.Status.REVOKED:
+                return "Consent for this remedial exam was revoked. Contact your teacher."
+            if consent.status == RemedialExamConsent.Status.EXPIRED:
+                return "The parent or legal-guardian consent request expired. Ask your teacher to send a new request."
         return ""
+    def get_consent_status(self, assessment):
+        request = self.context.get("request")
+        if assessment.kind != Assessment.Kind.REMEDIAL or not request or role_for(request.user) != UserProfile.Role.STUDENT:
+            return "not_required"
+        consent = assessment.remedial_consents.filter(student=request.user).first()
+        return consent.status if consent else "not_requested"
     def get_competency_ids(self, assessment):
         return list(assessment.questions.values_list("competency_id", flat=True).distinct())
     def validate(self, attrs):
@@ -312,7 +453,7 @@ class AssessmentSerializer(serializers.ModelSerializer):
         return attrs
     class Meta:
         model = Assessment
-        fields = ["id", "title", "subject", "kind", "instructions", "due_at", "is_active", "available", "availability_reason", "remaining_activities", "created_by", "question_count", "competency_ids", "assigned_classes"]
+        fields = ["id", "title", "subject", "kind", "instructions", "due_at", "is_active", "available", "availability_reason", "remaining_activities", "consent_status", "created_by", "question_count", "competency_ids", "assigned_classes"]
         read_only_fields = ["created_by"]
 
 class QuestionPublicSerializer(serializers.ModelSerializer):
@@ -342,9 +483,20 @@ class AssessmentDetailSerializer(AssessmentSerializer):
 
 class CompetencyResultSerializer(serializers.ModelSerializer):
     competency_title = serializers.CharField(source="competency.title", read_only=True)
+    subject = serializers.IntegerField(source="competency.subject_id", read_only=True)
+    subject_name = serializers.CharField(source="competency.subject.name", read_only=True)
     class Meta:
         model = CompetencyResult
-        fields = ["id", "competency", "competency_title", "score", "status"]
+        fields = ["id", "competency", "competency_title", "subject", "subject_name", "score", "status"]
+
+class LearnerCompetencyEvidenceSerializer(serializers.ModelSerializer):
+    competency_title = serializers.CharField(source="competency.title", read_only=True)
+    subject = serializers.IntegerField(source="competency.subject_id", read_only=True)
+    subject_name = serializers.CharField(source="competency.subject.name", read_only=True)
+    evidence_type_label = serializers.CharField(source="get_evidence_type_display", read_only=True)
+    class Meta:
+        model = LearnerCompetencyEvidence
+        fields = ["id", "competency", "competency_title", "subject", "subject_name", "evidence_type", "evidence_type_label", "score", "summary", "details", "occurred_at"]
 
 class AssessmentAttemptSerializer(serializers.ModelSerializer):
     competency_results = CompetencyResultSerializer(many=True, read_only=True)
@@ -391,7 +543,7 @@ class RecoveryActivitySerializer(serializers.ModelSerializer):
         }
     class Meta:
         model = RecoveryActivity
-        fields = ["id", "title", "position", "due_at", "completed_at", "resource", "resource_title", "resource_type", "content", "file_url", "practice_questions", "passing_score", "review"]
+        fields = ["id", "title", "position", "due_at", "completed_at", "resource", "resource_title", "resource_type", "content", "file_url", "practice_questions", "passing_score", "review", "recommendation_reason", "recommendation_metadata"]
 
 class RecoveryPlanSerializer(serializers.ModelSerializer):
     activities = RecoveryActivitySerializer(many=True, read_only=True)
@@ -443,13 +595,15 @@ class ActivityAttemptSerializer(serializers.ModelSerializer):
 
 class ContentImportSerializer(serializers.ModelSerializer):
     source_file_url = serializers.SerializerMethodField()
+    uploaded_by_name = serializers.SerializerMethodField()
+    uploaded_by_email = serializers.EmailField(source="uploaded_by.email", read_only=True)
     published_assessment_title = serializers.CharField(source="published_assessment.title", read_only=True)
     published_resource_title = serializers.CharField(source="published_resource.title", read_only=True)
 
     class Meta:
         model = ContentImport
-        fields = ["id", "title", "kind", "source_file", "source_file_url", "original_filename", "mime_type", "size_bytes", "checksum_sha256", "subject", "competency", "uploaded_by", "status", "configuration", "extracted_text", "extracted_payload", "error_message", "published_assessment", "published_assessment_title", "published_resource", "published_resource_title", "reviewed_by", "reviewed_at", "created_at", "updated_at"]
-        read_only_fields = ["original_filename", "mime_type", "size_bytes", "checksum_sha256", "uploaded_by", "status", "extracted_text", "error_message", "published_assessment", "published_resource", "reviewed_by", "reviewed_at", "created_at", "updated_at"]
+        fields = ["id", "title", "kind", "source_file", "source_file_url", "original_filename", "mime_type", "size_bytes", "checksum_sha256", "subject", "competency", "uploaded_by", "uploaded_by_name", "uploaded_by_email", "status", "configuration", "extracted_text", "extracted_payload", "error_message", "published_assessment", "published_assessment_title", "published_resource", "published_resource_title", "reviewed_by", "reviewed_at", "archived_by", "archived_at", "created_at", "updated_at"]
+        read_only_fields = ["original_filename", "mime_type", "size_bytes", "checksum_sha256", "uploaded_by", "status", "extracted_text", "error_message", "published_assessment", "published_resource", "reviewed_by", "reviewed_at", "archived_by", "archived_at", "created_at", "updated_at"]
         extra_kwargs = {"source_file": {"write_only": True}}
 
     def get_source_file_url(self, content_import):
@@ -457,11 +611,24 @@ class ContentImportSerializer(serializers.ModelSerializer):
         path = f"/api/content-imports/{content_import.id}/source/"
         return protected_media_url(request, "import", content_import.id, path)
 
+    def get_uploaded_by_name(self, content_import):
+        return content_import.uploaded_by.get_full_name() or content_import.uploaded_by.email
+
     def validate(self, attrs):
         kind = attrs.get("kind", getattr(self.instance, "kind", None))
         source_file = attrs.get("source_file")
         subject = attrs.get("subject", getattr(self.instance, "subject", None))
         competency = attrs.get("competency", getattr(self.instance, "competency", None))
+        configuration = attrs.get("configuration", getattr(self.instance, "configuration", {})) or {}
+        request = self.context.get("request")
+        profile = getattr(getattr(request, "user", None), "tala_profile", None)
+        if profile and profile.role == UserProfile.Role.TEACHER and subject and not profile.assigned_subjects.filter(pk=subject.pk).exists():
+            raise serializers.ValidationError({"subject": "You can upload content only for subjects assigned to you."})
+        assigned_class_ids = {int(item) for item in configuration.get("assigned_class_ids", [])}
+        if profile and profile.role == UserProfile.Role.TEACHER and assigned_class_ids:
+            allowed_class_ids = set(profile.assigned_classes.values_list("id", flat=True))
+            if not assigned_class_ids.issubset(allowed_class_ids):
+                raise serializers.ValidationError({"configuration": "You can assign material only to your assigned classes."})
         if competency and subject and competency.subject_id != subject.id:
             raise serializers.ValidationError({"competency": "The competency must belong to the selected subject."})
         if source_file:
@@ -493,8 +660,10 @@ class ContentImportSerializer(serializers.ModelSerializer):
         )
 
     def update(self, instance, validated_data):
-        if instance.status != ContentImport.Status.NEEDS_REVIEW:
-            raise serializers.ValidationError("Only imports awaiting review can be edited.")
+        if instance.status not in {ContentImport.Status.NEEDS_REVIEW, ContentImport.Status.PUBLISHED}:
+            raise serializers.ValidationError("Only imports awaiting review or published learning content can be edited.")
+        if instance.status == ContentImport.Status.PUBLISHED and instance.kind == ContentImport.Kind.EXAM:
+            raise serializers.ValidationError("Published assessments must be revised from the Assessments workspace.")
         allowed = {"title", "competency", "configuration", "extracted_payload"}
         for field, value in validated_data.items():
             if field in allowed:

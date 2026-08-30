@@ -1,9 +1,11 @@
+import hashlib
 import mimetypes
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
+from django.core.cache import cache
 from django.http import FileResponse
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
@@ -25,8 +27,6 @@ class TalaTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         data = super().validate(attrs)
-        if self.user.is_superuser:
-            raise serializers.ValidationError("This technical account is available only through Django Admin.")
         profile = getattr(self.user, "tala_profile", None)
         if profile and not profile.is_active:
             raise serializers.ValidationError("This account has been deactivated.")
@@ -48,6 +48,7 @@ def user_payload(user):
         "email": user.email,
         "name": user.get_full_name() or user.username,
         "role": profile.role if profile else ("admin" if user.is_superuser else "student"),
+        "is_superadmin": user.is_superuser,
         "class_name": str(profile.academic_class) if profile and profile.academic_class else None,
         "must_change_password": bool(profile and profile.must_change_password),
         "mfa_enabled": bool(profile and profile.mfa_enabled),
@@ -55,6 +56,25 @@ def user_payload(user):
 
 class TalaTokenObtainPairView(TokenObtainPairView):
     serializer_class = TalaTokenObtainPairSerializer
+    throttle_scope = "login"
+
+    def post(self, request, *args, **kwargs):
+        identity = str(request.data.get("username") or request.data.get("email") or "").strip().casefold()
+        digest = hashlib.sha256(identity.encode()).hexdigest()
+        failure_key = f"tala:login-failures:{digest}"
+        lock_key = f"tala:login-lock:{digest}"
+        if identity and cache.get(lock_key):
+            return Response({"detail": "Too many unsuccessful sign-in attempts. Try again in 15 minutes or reset your password."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        response = super().post(request, *args, **kwargs)
+        if response.status_code < 400:
+            cache.delete_many([failure_key, lock_key])
+        elif identity:
+            failures = int(cache.get(failure_key, 0)) + 1
+            cache.set(failure_key, failures, timeout=15 * 60)
+            if failures >= 5:
+                cache.set(lock_key, True, timeout=15 * 60)
+                AuditEvent.objects.create(actor=None, action="account.login_locked", object_type="AuthenticationIdentity", object_id=digest[:16], metadata={"failed_attempts": failures})
+        return response
 
 class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]

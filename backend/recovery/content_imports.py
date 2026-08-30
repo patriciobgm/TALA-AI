@@ -1,10 +1,13 @@
 import re
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Assessment, AuditEvent, Competency, ContentImport, LearningResource, Notification, Question, UserProfile
+from .models import Assessment, AuditEvent, Competency, ContentImport, LearningAssignment, LearningResource, Notification, PracticeQuestion, Question, UserProfile
 from .notifications import notify
+from .resource_index import index_learning_resource
+from .transcription import transcribe_video
 
 
 class ContentImportError(ValueError):
@@ -15,7 +18,8 @@ def _extract_pdf(file_obj):
     from pypdf import PdfReader
 
     file_obj.seek(0)
-    return "\n".join(page.extract_text() or "" for page in PdfReader(file_obj))
+    reader = PdfReader(file_obj)
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 def _extract_docx(file_obj):
@@ -46,11 +50,20 @@ def extract_document_text(content_import):
 
 QUESTION_START = re.compile(r"(?m)^\s*(\d+)[.)]\s+")
 CHOICE_LINE = re.compile(r"^\s*([A-Fa-f])[.)]\s*(.+?)\s*$")
+INLINE_CHOICE_MARKER = re.compile(r"(?<!\w)([A-Fa-f])[.)]\s*")
 ANSWER_LINE = re.compile(r"^\s*(?:answer|correct answer|key)\s*:\s*(.+?)\s*$", re.IGNORECASE)
 COMPETENCY_LINE = re.compile(r"^\s*competenc(?:y|ies)\s*:\s*(.+?)\s*$", re.IGNORECASE)
+ANSWER_KEY_ITEM = re.compile(r"^\s*(\d+)\s*[.)]\s*(.+?)\s*$")
 
 
-def parse_exam_text(text, default_competency=None):
+def _choices_from_line(line):
+    matches = list(INLINE_CHOICE_MARKER.finditer(line))
+    if not matches or line[:matches[0].start()].strip():
+        return []
+    return [{"label": match.group(1).upper(), "text": line[match.end(): matches[index + 1].start() if index + 1 < len(matches) else len(line)].strip()} for index, match in enumerate(matches) if line[match.end(): matches[index + 1].start() if index + 1 < len(matches) else len(line)].strip()]
+
+
+def parse_exam_text(text, default_competency=None, answer_key=None):
     starts = list(QUESTION_START.finditer(text))
     questions = []
     for index, match in enumerate(starts):
@@ -58,18 +71,22 @@ def parse_exam_text(text, default_competency=None):
         lines = [line.strip() for line in block.splitlines() if line.strip()]
         prompt_lines, options, answer, competency_code = [], [], "", ""
         for line in lines:
+            inline_options = _choices_from_line(line)
             choice_match = CHOICE_LINE.match(line)
             answer_match = ANSWER_LINE.match(line)
             competency_match = COMPETENCY_LINE.match(line)
-            if choice_match:
+            if inline_options:
+                options.extend(inline_options)
+            elif choice_match:
                 options.append({"label": choice_match.group(1).upper(), "text": choice_match.group(2)})
             elif answer_match:
                 answer = answer_match.group(1).strip()
             elif competency_match:
                 competency_code = competency_match.group(1).strip()
-            elif not options and not answer:
+            elif not options and not answer and not re.fullmatch(r"\d{1,3}", line):
                 prompt_lines.append(line)
         prompt = " ".join(prompt_lines).strip()
+        answer = answer or str((answer_key or {}).get(int(match.group(1)), "")).strip()
         if not prompt or not answer:
             continue
         if len(answer) == 1 and options:
@@ -92,14 +109,53 @@ def parse_exam_text(text, default_competency=None):
     return questions
 
 
+def _module_section(lines, heading, start=0):
+    normalized_heading = heading.casefold()
+    candidates = [index for index, line in enumerate(lines[start:], start=start) if line.strip().rstrip(":").casefold() == normalized_heading]
+    return candidates[-1] if candidates else None
+
+
+def parse_module_questions(text, default_competency=None):
+    """Extract the end-of-module assessment and its separately printed answer key."""
+    lines = text.splitlines()
+    answer_key_start = _module_section(lines, "Answer Key")
+    if answer_key_start is None:
+        return parse_exam_text(text, default_competency)
+    assessment_start = _module_section(lines[:answer_key_start], "Assessment")
+    section_name = "Assessment"
+    if assessment_start is None:
+        assessment_start = _module_section(lines[:answer_key_start], "What I Know")
+        section_name = "What I Know"
+    if assessment_start is None:
+        return parse_exam_text(text, default_competency)
+    section_end = next((index for index in range(assessment_start + 1, answer_key_start) if lines[index].strip().rstrip(":").casefold() in {"additional activities", "answer key", "references"}), answer_key_start)
+    key_section_start = next((index for index in range(answer_key_start + 1, len(lines)) if lines[index].strip().rstrip(":").casefold() == section_name.casefold()), None)
+    if key_section_start is None:
+        return parse_exam_text("\n".join(lines[assessment_start + 1:section_end]), default_competency)
+    answer_key = {}
+    for line in lines[key_section_start + 1:]:
+        stripped = line.strip()
+        if stripped.endswith(":") and not ANSWER_KEY_ITEM.match(stripped):
+            break
+        match = ANSWER_KEY_ITEM.match(stripped)
+        if match:
+            answer_key[int(match.group(1))] = match.group(2).strip()
+    return parse_exam_text("\n".join(lines[assessment_start + 1:section_end]), default_competency, answer_key)
+
+
 def process_content_import(content_import):
     content_import.status = ContentImport.Status.PROCESSING
     content_import.error_message = ""
     content_import.save(update_fields=["status", "error_message", "updated_at"])
     try:
         if content_import.kind == ContentImport.Kind.VIDEO:
-            payload = {"resource_type": LearningResource.ResourceType.VIDEO, "description": content_import.configuration.get("description", "")}
-            text = ""
+            if settings.WHISPER_ENABLED:
+                text = transcribe_video(content_import)
+                practice_questions = parse_module_questions(text, content_import.competency)
+                payload = {"resource_type": LearningResource.ResourceType.VIDEO, "description": content_import.configuration.get("description", ""), "transcription_status": "completed", "transcript_character_count": len(text), "practice_questions": practice_questions, "practice_question_count": len(practice_questions)}
+            else:
+                payload = {"resource_type": LearningResource.ResourceType.VIDEO, "description": content_import.configuration.get("description", ""), "transcription_status": "not_configured", "practice_questions": [], "practice_question_count": 0}
+                text = ""
         else:
             text = extract_document_text(content_import)
             if content_import.kind == ContentImport.Kind.EXAM:
@@ -108,7 +164,8 @@ def process_content_import(content_import):
                     raise ContentImportError("No complete questions were detected. Use numbered questions and include an 'Answer:' line for each item.")
                 payload = {"questions": questions, "question_count": len(questions)}
             else:
-                payload = {"resource_type": LearningResource.ResourceType.MODULE, "character_count": len(text)}
+                practice_questions = parse_module_questions(text, content_import.competency)
+                payload = {"resource_type": LearningResource.ResourceType.MODULE, "character_count": len(text), "practice_questions": practice_questions, "practice_question_count": len(practice_questions)}
         content_import.extracted_text = text
         content_import.extracted_payload = payload
         content_import.status = ContentImport.Status.NEEDS_REVIEW
@@ -138,6 +195,32 @@ def _validate_exam_payload(content_import):
             raise ContentImportError(f"Question {position}'s correct answer must match one of its choices.")
         validated.append((competency, prompt, question_type, options, correct_answer))
     return validated
+
+
+@transaction.atomic
+def sync_published_practice_questions(content_import, actor):
+    if content_import.kind not in {ContentImport.Kind.MODULE, ContentImport.Kind.VIDEO} or not content_import.published_resource_id:
+        return 0
+    questions = content_import.extracted_payload.get("practice_questions", [])
+    validated = []
+    for position, item in enumerate(questions, start=1):
+        prompt = str(item.get("prompt", "")).strip()
+        answer = str(item.get("correct_answer", "")).strip()
+        question_type = item.get("question_type")
+        options = [str(option).strip() for option in item.get("options", []) if str(option).strip()]
+        if not prompt or not answer or question_type not in PracticeQuestion.QuestionType.values:
+            raise ContentImportError(f"Quiz question {position} is incomplete.")
+        if question_type in {PracticeQuestion.QuestionType.MULTIPLE_CHOICE, PracticeQuestion.QuestionType.TRUE_FALSE} and answer not in options:
+            raise ContentImportError(f"Quiz question {position}'s correct answer must match one of its choices.")
+        validated.append((prompt, question_type, options, answer, str(item.get("explanation", ""))))
+    resource = content_import.published_resource
+    resource.practice_questions.all().delete()
+    PracticeQuestion.objects.bulk_create([
+        PracticeQuestion(resource=resource, prompt=prompt, question_type=question_type, options=options, correct_answer=answer, explanation=explanation, position=position)
+        for position, (prompt, question_type, options, answer, explanation) in enumerate(validated, start=1)
+    ])
+    AuditEvent.objects.create(actor=actor, action="content_import.quiz_revised", object_type="ContentImport", object_id=str(content_import.id), metadata={"question_count": len(validated), "resource_id": resource.id})
+    return len(validated)
 
 
 @transaction.atomic
@@ -171,14 +254,27 @@ def publish_content_import(content_import, reviewer):
             original_filename=content_import.original_filename,
             mime_type=content_import.mime_type,
             is_approved=True,
-            uploaded_by=reviewer,
+            uploaded_by=content_import.uploaded_by,
         )
         if content_import.competency_id:
             resource.competencies.add(content_import.competency)
+        if resource_type in {LearningResource.ResourceType.MODULE, LearningResource.ResourceType.VIDEO}:
+            for position, item in enumerate(content_import.extracted_payload.get("practice_questions", []), start=1):
+                prompt = str(item.get("prompt", "")).strip()
+                answer = str(item.get("correct_answer", "")).strip()
+                question_type = item.get("question_type")
+                options = [str(option).strip() for option in item.get("options", []) if str(option).strip()]
+                if prompt and answer and question_type in PracticeQuestion.QuestionType.values:
+                    PracticeQuestion.objects.create(resource=resource, prompt=prompt, question_type=question_type, options=options, correct_answer=answer, explanation=str(item.get("explanation", "")), position=position)
+        index_learning_resource(resource)
         content_import.published_resource = resource
-        students = UserProfile.objects.filter(role=UserProfile.Role.STUDENT, user__recovery_plans__competency=content_import.competency, user__recovery_plans__status="active").select_related("user").distinct()
-        for profile in students:
-            notify(recipient=profile.user, kind=Notification.Kind.CONTENT_PUBLISHED, title="New learning material", message=f"{resource.title} is now available for your recovery plan.", action_url="/recovery", deduplication_key=f"resource:{resource.id}:student:{profile.user_id}")
+        class_ids = content_import.configuration.get("assigned_class_ids", [])
+        if class_ids:
+            assignment = LearningAssignment.objects.create(resource=resource, assigned_by=content_import.uploaded_by, instructions=content_import.configuration.get("instructions", ""), due_at=content_import.configuration.get("due_at") or None)
+            assignment.assigned_classes.set(class_ids)
+            students = UserProfile.objects.filter(role=UserProfile.Role.STUDENT, academic_class_id__in=class_ids, is_active=True).select_related("user").distinct()
+            for profile in students:
+                notify(recipient=profile.user, kind=Notification.Kind.LEARNING_ASSIGNED, title="Learning material assigned", message=f"{resource.title} has been assigned to your class.", action_url="/materials", deduplication_key=f"learning-assignment:{assignment.id}:student:{profile.user_id}")
     content_import.status = ContentImport.Status.PUBLISHED
     content_import.reviewed_by = reviewer
     content_import.reviewed_at = timezone.now()

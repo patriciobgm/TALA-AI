@@ -1,5 +1,11 @@
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000/api';
 
+export function normalizeProtectedUrl(url: string) {
+  const mediaUrl = new URL(url, window.location.origin);
+  const apiUrl = new URL(API_URL, window.location.origin);
+  return `${apiUrl.origin}${mediaUrl.pathname}${mediaUrl.search}`;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string, public data?: unknown) { super(message); }
 }
@@ -49,4 +55,14 @@ export async function api<T>(path: string, options: RequestInit = {}, retry = tr
     throw new ApiError(response.status, errorMessage(data, response.status), data);
   }
   return response.status === 204 ? undefined as T : response.json();
+}
+
+export async function protectedBlob(url: string, retry = true): Promise<Blob> {
+  const token = sessionStorage.getItem('tala_access');
+  const headers = new Headers();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(normalizeProtectedUrl(url), { headers });
+  if (response.status === 401 && retry && await refreshAccess()) return protectedBlob(url, false);
+  if (!response.ok) throw new ApiError(response.status, `The document could not be loaded (${response.status}).`);
+  return response.blob();
 }

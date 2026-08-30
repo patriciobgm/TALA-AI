@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Avatar, Box, Button, Card, Divider, FormControl, InputLabel,
   Alert, CircularProgress, LinearProgress, MenuItem, Select, Stack, Table, TableBody, TableCell, TableContainer,
@@ -12,13 +12,15 @@ import { PageHeader } from '../components/PageHeader';
 import { StatusChip } from '../components/StatusChip';
 import { downloadText } from '../utils/download';
 import { DataTablePagination, DataTableToolbar, SortableTableCell, useDataTable } from '../components/DataTable';
+import { useTeachingScope } from '../components/TeachingScopeContext';
 
 export function TeacherDashboard({ onSelectLearner }: { onSelectLearner: (id: number) => void }) {
   const [status, setStatus] = useState('All');
   const [learners, setLearners] = useState<ApiLearner[] | null>(null);
   const [error, setError] = useState('');
-  const load = () => api<ApiLearner[]>('/dashboard/teacher/learners/').then(setLearners).catch(reason => setError(reason.message));
-  useEffect(() => { void load(); }, []);
+  const scope = useTeachingScope();
+  const load = useCallback(() => { if (!scope?.selectedSubjectId) return Promise.resolve(); setLearners(null); setError(''); return api<ApiLearner[]>(`/dashboard/teacher/learners/?subject=${scope.selectedSubjectId}`).then(setLearners).catch(reason => setError(reason.message)); }, [scope?.selectedSubjectId]);
+  useEffect(() => { void load(); }, [load]);
   const statusRows = (learners ?? []).filter(learner => status === 'All' || learner.status === status);
   const table = useDataTable(statusRows, { searchText: learner => `${learner.name} ${learner.email} ${learner.section} ${learner.status}`, sortValues: { learner: learner => learner.name, progress: learner => learner.progress, gaps: learner => learner.gaps, assessment: learner => learner.assessment, status: learner => learner.status }, initialSort: 'learner' });
   if (!learners && !error) return <Box sx={{ minHeight: 360, display: 'grid', placeItems: 'center' }}><CircularProgress size={28} /></Box>;
@@ -40,7 +42,7 @@ export function TeacherDashboard({ onSelectLearner }: { onSelectLearner: (id: nu
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'minmax(0, 1fr) 320px' }, gap: 3 }}>
       <Card sx={{ overflow: 'hidden' }}>
         <Box sx={{ p: 2.5, display: 'flex', justifyContent: 'space-between', gap: 2, alignItems: { xs: 'stretch', sm: 'center' }, flexDirection: { xs: 'column', sm: 'row' } }}>
-          <Box><Typography variant="h2">Learner progress</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .25 }}>General Mathematics · Grade 11 – Rizal</Typography></Box>
+          <Box><Typography variant="h2">Learner progress</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .25 }}>{scope?.selectedSubject?.name ?? 'Assigned subject'} · {scope?.classes.map(item => `Grade ${item.grade_level} – ${item.name}`).join(', ') || 'No assigned class'}</Typography></Box>
           <Stack direction="row" gap={1}>
             <FormControl size="small" sx={{ minWidth: 120 }}><InputLabel>Status</InputLabel><Select value={status} label="Status" onChange={e => setStatus(e.target.value)}><MenuItem value="All">All</MenuItem><MenuItem value="On track">On track</MenuItem><MenuItem value="Monitor">Monitor</MenuItem><MenuItem value="Intervention">Intervention</MenuItem></Select></FormControl>
           </Stack>

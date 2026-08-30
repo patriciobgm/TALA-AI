@@ -6,13 +6,16 @@ import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import type { Dashboard } from '@/lib/types';
 import { colors, radius, spacing } from '@/constants/tokens';
+import { useStudentScope } from '@/lib/student-scope';
 
 export default function ProgressScreen() {
   const { user, signOut } = useAuth();
   const router = useRouter();
+  const scope = useStudentScope();
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState('');
-  useFocusEffect(useCallback(() => { api<Dashboard>('/dashboard/student/').then(setData).catch(reason => setError(reason.message)); }, []));
+  useFocusEffect(useCallback(() => { if (!scope.selectedSubjectId) return; setData(null); api<Dashboard>(`/dashboard/student/?subject=${scope.selectedSubjectId}`).then(setData).catch(reason => setError(reason.message)); }, [scope.selectedSubjectId]));
+  if (!scope.loading && !scope.selectedSubjectId) return <View style={styles.center}><Text style={styles.empty}>No subject with assigned learning work is available yet.</Text></View>;
   if (!data && !error) return <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>;
   const active = data?.plans.find(plan => plan.status === 'active');
   const activityCount = active?.activities.length ?? 0;
