@@ -1,11 +1,11 @@
 export type Role = 'student' | 'teacher' | 'admin';
-export type AuthUser = { id: number; name: string; email: string; role: Role; class_name: string | null };
+export type AuthUser = { id: number; name: string; email: string; role: Role; class_name: string | null; must_change_password: boolean; privacy_acknowledgment_required: boolean };
 export type Subject = { id: number; name: string; code: string; grade_level: number; is_active: boolean; competency_count: number };
 export type PracticeQuestion = { id: number; prompt: string; question_type: 'mcq' | 'tf' | 'short'; options: string[]; position: number };
 export type PracticeFeedback = { question_id: number; student_answer: string; correct_answer: string; is_correct: boolean; explanation: string };
 export type Activity = { id: number; title: string; position: number; due_at: string | null; completed_at: string | null; resource: number | null; resource_type?: 'lesson' | 'example' | 'exercise' | 'module' | 'video'; content?: string; file_url?: string; practice_questions: PracticeQuestion[]; passing_score?: number; review?: { answers: Record<string, string>; score: string; completed_at: string; feedback: PracticeFeedback[] } | null };
 export type Plan = { id: number; competency: number; competency_title: string; status: string; baseline_score: string; created_at: string; activities: Activity[]; mastery_assessment: { id: number; title: string; available: boolean; remaining_activities: number; availability_reason: string } | null };
-export type Dashboard = { mastered: number; total_competencies: number; plans: Plan[]; attempts: { id: number; score: string; submitted_at: string }[] };
+export type Dashboard = { academic_class: { id: number; label: string; subject_name: string | null; class_code: string | null } | null; mastered: number; total_competencies: number; plans: Plan[]; attempts: { id: number; score: string; submitted_at: string }[] };
 export type Question = { id: number; prompt: string; question_type: 'mcq' | 'tf' | 'short'; options: string[] };
 export type Assessment = { id: number; title: string; kind: 'pre' | 'post' | 'remedial'; instructions: string; due_at: string | null; available: boolean; availability_reason: string; remaining_activities: number; consent_status?: string; question_count: number; questions?: Question[] };
 export type AppNotification = { id: number; title: string; message: string; action_url: string; is_read: boolean; created_at: string };

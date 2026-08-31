@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Alert, Box, Button, Card, CircularProgress, Divider, FormControlLabel, List, ListItemButton, ListItemText, Stack, Switch, Typography } from '@mui/material';
-import { DoneAllOutlined } from '@mui/icons-material';
+import { Alert, Box, Button, Card, CircularProgress, Divider, FormControlLabel, IconButton, List, ListItemButton, ListItemText, Stack, Switch, Tooltip, Typography } from '@mui/material';
+import { Close, DoneAllOutlined } from '@mui/icons-material';
 import { api } from '../api/client';
 import type { ApiNotification } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
@@ -31,6 +31,10 @@ export function NotificationsPage({ onOpenUrl }: { onOpenUrl: (url: string) => v
     }
     if (item.action_url) onOpenUrl(item.action_url);
   };
+  const dismiss = async (item: ApiNotification) => {
+    await api(`/notifications/${item.id}/dismiss/`, { method: 'DELETE' });
+    setItems(current => current?.filter(found => found.id !== item.id) ?? []);
+  };
   const savePreferences = async () => {
     try {
       const updated = await api<Preferences>('/notification-preferences/', { method: 'PATCH', body: JSON.stringify(preferences) });
@@ -45,7 +49,7 @@ export function NotificationsPage({ onOpenUrl }: { onOpenUrl: (url: string) => v
     {saved && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSaved(false)}>Notification preferences saved.</Alert>}
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'minmax(0, 1fr) 320px' }, gap: 3, alignItems: 'start' }}>
       <Card>
-        {items?.length ? <List disablePadding>{items.map((item, index) => <Box key={item.id}><ListItemButton onClick={() => void openNotification(item)} sx={{ px: 2.5, py: 2, alignItems: 'flex-start', bgcolor: item.is_read ? 'transparent' : '#f2f7fa' }}><Box aria-hidden sx={{ width: 8, height: 8, mt: .8, mr: 1.5, borderRadius: '50%', bgcolor: item.is_read ? 'transparent' : 'primary.main' }} /><ListItemText primary={<Typography variant="body2" fontWeight={item.is_read ? 600 : 750}>{item.title}</Typography>} secondary={<><Typography component="span" variant="body2" color="text.secondary" sx={{ display: 'block', mt: .5 }}>{item.message}</Typography><Typography component="span" variant="caption" color="text.secondary" sx={{ display: 'block', mt: .75 }}>{new Date(item.created_at).toLocaleString()}</Typography></>} /></ListItemButton>{index < items.length - 1 && <Divider />}</Box>)}</List> : <Box sx={{ p: 5, textAlign: 'center' }}><Typography fontWeight={700}>No notifications</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Progress updates and reminders will appear here.</Typography></Box>}
+        {items?.length ? <List disablePadding>{items.map((item, index) => <Box key={item.id} sx={{ position: 'relative' }}><ListItemButton onClick={() => void openNotification(item)} sx={{ pl: 2.5, pr: 7, py: 2, alignItems: 'flex-start', bgcolor: item.is_read ? 'transparent' : '#f2f7fa' }}><Box aria-hidden sx={{ width: 8, height: 8, mt: .8, mr: 1.5, borderRadius: '50%', bgcolor: item.is_read ? 'transparent' : 'primary.main' }} /><ListItemText primary={<Typography variant="body2" fontWeight={item.is_read ? 600 : 750}>{item.title}</Typography>} secondary={<><Typography component="span" variant="body2" color="text.secondary" sx={{ display: 'block', mt: .5 }}>{item.message}</Typography><Typography component="span" variant="caption" color="text.secondary" sx={{ display: 'block', mt: .75 }}>{new Date(item.created_at).toLocaleString()}</Typography></>} /></ListItemButton><Tooltip title="Dismiss notification"><IconButton size="small" aria-label={`Dismiss ${item.title}`} onClick={() => void dismiss(item)} sx={{ position: 'absolute', right: 14, top: 14 }}><Close fontSize="small" /></IconButton></Tooltip>{index < items.length - 1 && <Divider />}</Box>)}</List> : <Box sx={{ p: 5, textAlign: 'center' }}><Typography fontWeight={700}>No notifications</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Progress updates and reminders will appear here.</Typography></Box>}
       </Card>
       <Card sx={{ p: 2.5 }}><Typography variant="h2">Preferences</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5, mb: 2 }}>Choose which updates can be delivered outside the app.</Typography><Stack><FormControlLabel control={<Switch checked={preferences.reminders_enabled} onChange={event => setPreferences(current => ({ ...current, reminders_enabled: event.target.checked }))} />} label="Activity reminders" /><FormControlLabel control={<Switch checked={preferences.email_enabled} onChange={event => setPreferences(current => ({ ...current, email_enabled: event.target.checked }))} />} label="Email notifications" /><FormControlLabel control={<Switch checked={preferences.push_enabled} onChange={event => setPreferences(current => ({ ...current, push_enabled: event.target.checked }))} />} label="Mobile push notifications" /></Stack><Button variant="outlined" fullWidth sx={{ mt: 2 }} onClick={savePreferences}>Save preferences</Button></Card>
     </Box>

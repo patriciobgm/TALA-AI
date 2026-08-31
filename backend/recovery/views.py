@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+import json
 import re
 from urllib.parse import quote
 from django.conf import settings
@@ -20,11 +21,14 @@ from rest_framework.response import Response
 
 from .content_imports import ContentImportError, process_content_import, publish_content_import, sync_published_practice_questions
 from .learning_intelligence import rank_learning_resources, record_evidence
-from .models import AIMessage, AIMessageEvaluation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, GuardianContact, Intervention, LearnerCompetencyEvidence, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyRequest, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, Subject, SystemConfiguration, UsabilityEvaluation, UserProfile
+from .models import AIMessage, AIMessageEvaluation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GuardianContact, Intervention, LearnerCompetencyEvidence, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyRequest, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SystemConfiguration, UsabilityEvaluation, UserProfile
+from .assessment_rules import incomplete_prerequisite_assignments, remedial_student_is_eligible
+from .llm.base import LLMRequest, LLMUnavailable
+from .llm.factory import get_llm_provider
 from .notifications import assigned_teachers_for, notify
 from .permissions import IsAdmin, IsStudent, IsTeacher, IsTeacherOrAdmin, role_for
 from .secure_media import validate_media_token
-from .serializers import AcademicClassSerializer, ActivityAttemptSerializer, AssessmentAttemptSerializer, AssessmentDetailSerializer, AssessmentSerializer, AuditEventSerializer, CompetencySerializer, ContentImportSerializer, DeviceRegistrationSerializer, InterventionSerializer, LearnerCompetencyEvidenceSerializer, LearningAssignmentSerializer, NotificationPreferenceSerializer, NotificationSerializer, QuestionEditorSerializer, ResourceSerializer, RecoveryActivitySerializer, RecoveryPlanSerializer, SubjectSerializer, SystemConfigurationSerializer, UserAdminSerializer
+from .serializers import AcademicClassSerializer, ActivityAttemptSerializer, AssessmentAttemptSerializer, AssessmentDetailSerializer, AssessmentSerializer, AuditEventSerializer, CompetencySerializer, ContentImportSerializer, DeviceRegistrationSerializer, EnrollmentRequestSerializer, InterventionSerializer, LearnerCompetencyEvidenceSerializer, LearningAssignmentSerializer, NotificationPreferenceSerializer, NotificationSerializer, QuestionEditorSerializer, ResourceSerializer, RecoveryActivitySerializer, RecoveryPlanSerializer, SubjectSerializer, SystemConfigurationSerializer, UserAdminSerializer
 from .services import calculate_competency_results, create_recovery_plan
 from .resource_index import index_learning_resource
 from .research_evidence import build_evidence_package, freeze_evidence_package
@@ -83,6 +87,10 @@ def protected_file_response(request, file_field, mime_type, filename):
     response["Content-Disposition"] = disposition
     response["Cache-Control"] = "private, max-age=300"
     response["Accept-Ranges"] = "bytes"
+    # These URLs are short-lived, signed, and intentionally displayed by the
+    # learning-material reader. Django's global DENY policy would otherwise
+    # turn the embedded PDF viewer into a blank frame.
+    response.xframe_options_exempt = True
     return response
 
 @api_view(["GET"])
@@ -348,7 +356,8 @@ class UserAdminViewSet(viewsets.ModelViewSet):
         queryset = get_user_model().objects.filter(tala_profile__isnull=False).exclude(pk=self.request.user.pk).select_related("tala_profile__academic_class")
         if not self.request.user.is_superuser:
             queryset = queryset.exclude(tala_profile__role=UserProfile.Role.ADMIN)
-        if role_filter := self.request.query_params.get("role"):
+        role_filter = self.request.query_params.get("role")
+        if role_filter:
             queryset = queryset.filter(tala_profile__role=role_filter)
         if grade_filter := self.request.query_params.get("grade"):
             queryset = queryset.filter(tala_profile__academic_class__grade_level=grade_filter)
@@ -358,12 +367,17 @@ class UserAdminViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(is_active=status_filter == "active", tala_profile__is_active=status_filter == "active")
         if search := self.request.query_params.get("search", "").strip():
             queryset = queryset.filter(Q(first_name__icontains=search) | Q(last_name__icontains=search) | Q(email__icontains=search) | Q(tala_profile__academic_class__name__icontains=search))
-        ordering = {"user": "last_name", "role": "tala_profile__role", "assignment": "tala_profile__academic_class__name", "status": "is_active", "-user": "-last_name", "-role": "-tala_profile__role", "-assignment": "-tala_profile__academic_class__name", "-status": "-is_active"}.get(self.request.query_params.get("ordering", "user"), "last_name")
-        return queryset.order_by(ordering, "first_name", "id")
+        requested_ordering = self.request.query_params.get("ordering") or ("grade" if role_filter == UserProfile.Role.STUDENT else "user")
+        ordering = {"user": "last_name", "grade": "tala_profile__student_details__grade_level", "role": "tala_profile__role", "assignment": "tala_profile__academic_class__name", "status": "is_active", "-user": "-last_name", "-grade": "-tala_profile__student_details__grade_level", "-role": "-tala_profile__role", "-assignment": "-tala_profile__academic_class__name", "-status": "-is_active"}.get(requested_ordering, "last_name")
+        secondary = ["last_name", "first_name"] if requested_ordering.lstrip("-") == "grade" else ["first_name"]
+        return queryset.order_by(ordering, *secondary, "id")
 
     def perform_create(self, serializer):
         user = serializer.save()
         AuditEvent.objects.create(actor=self.request.user, action="user.created", object_type="User", object_id=str(user.pk), metadata={"email": user.email, "role": user.tala_profile.role})
+        if user.tala_profile.role == UserProfile.Role.STUDENT:
+            from .auth_views import send_reset_email
+            send_reset_email(user, self.request, onboarding=True)
 
     def perform_update(self, serializer):
         user = serializer.save()
@@ -450,6 +464,9 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
         if role == UserProfile.Role.STUDENT:
             profile = self.request.user.tala_profile
             queryset = queryset.filter(assigned_classes=profile.academic_class) if profile.academic_class_id else queryset.none()
+            learner_grade = getattr(getattr(profile, "student_details", None), "grade_level", profile.academic_class.grade_level if profile.academic_class_id else None)
+            if learner_grade:
+                queryset = queryset.filter(resource__competencies__subject__grade_level=learner_grade)
             if subject_id := self.request.query_params.get("subject"):
                 queryset = queryset.filter(resource__competencies__subject_id=subject_id)
             return queryset.distinct().order_by("-created_at", "-id")
@@ -463,6 +480,10 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
         if complete and assignment.resource.practice_questions.exists() and not assignment.quiz_attempts.filter(student=request.user, passed=True).exists():
             return Response({"detail": "Complete the module quiz before marking this material complete.", "code": "module_quiz_required"}, status=status.HTTP_409_CONFLICT)
         progress, _ = LearningAssignmentProgress.objects.get_or_create(assignment=assignment, student=request.user)
+        if complete and assignment.resource.resource_type == LearningResource.ResourceType.VIDEO:
+            watched = progress.duration_seconds > 0 and progress.playback_position_seconds / progress.duration_seconds >= 0.9
+            if not watched:
+                return Response({"detail": "Watch at least 90% of the video before completing this material.", "code": "video_viewing_required"}, status=status.HTTP_409_CONFLICT)
         now = timezone.now()
         update_fields = []
         if progress.opened_at is None:
@@ -532,8 +553,10 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
         if passed:
             progress, _ = LearningAssignmentProgress.objects.get_or_create(assignment=assignment, student=request.user)
             progress.opened_at = progress.opened_at or timezone.now()
-            progress.completed_at = progress.completed_at or timezone.now()
-            progress.save(update_fields=["opened_at", "completed_at"])
+            watched = assignment.resource.resource_type != LearningResource.ResourceType.VIDEO or (progress.duration_seconds > 0 and progress.playback_position_seconds / progress.duration_seconds >= 0.9)
+            if watched:
+                progress.completed_at = progress.completed_at or timezone.now()
+            progress.save(update_fields=["opened_at", "completed_at"] if watched else ["opened_at"])
         assignment = self.get_queryset().get(pk=assignment.pk)
         return Response({"score": round(float(score), 2), "passed": passed, "required_score": assignment.resource.passing_score, "assignment": self.get_serializer(assignment).data}, status=status.HTTP_201_CREATED)
 
@@ -545,6 +568,10 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         if role_for(self.request.user) == "student":
             profile = getattr(self.request.user, "tala_profile", None)
             queryset = queryset.filter(is_active=True, assigned_classes=profile.academic_class) if profile and profile.academic_class else queryset.none()
+            learner_grade = getattr(getattr(profile, "student_details", None), "grade_level", profile.academic_class.grade_level if profile and profile.academic_class else None)
+            if learner_grade:
+                queryset = queryset.filter(subject__grade_level=learner_grade)
+            queryset = queryset.filter(~Q(kind=Assessment.Kind.REMEDIAL) | Q(eligibilities__student=self.request.user, eligibilities__status__in=[AssessmentEligibility.Status.ELIGIBLE, AssessmentEligibility.Status.COMPLETED]) | Q(remedial_consents__student=self.request.user)).distinct()
             if subject_id := self.request.query_params.get("subject"):
                 queryset = queryset.filter(subject_id=subject_id)
             return queryset
@@ -565,20 +592,46 @@ class AssessmentViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         subject = serializer.validated_data["subject"]
-        if role_for(self.request.user) == UserProfile.Role.TEACHER and not self.request.user.tala_profile.assigned_subjects.filter(pk=subject.id).exists():
-            raise PermissionDenied("You are not assigned to this assessment subject.")
+        if role_for(self.request.user) == UserProfile.Role.TEACHER:
+            profile = self.request.user.tala_profile
+            if not profile.assigned_subjects.filter(pk=subject.id).exists():
+                raise PermissionDenied("You are not assigned to this assessment subject.")
+            assigned_classes = profile.assigned_classes.filter(is_active=True, grade_level=subject.grade_level)
+            serializer.validated_data.pop("assigned_classes", None)
+            assessment = serializer.save(created_by=self.request.user, is_active=False)
+            assessment.assigned_classes.set(assigned_classes)
+            return
         serializer.save(created_by=self.request.user, is_active=False)
 
     def perform_update(self, serializer):
         was_active = serializer.instance.is_active
         subject = serializer.validated_data.get("subject", serializer.instance.subject)
-        if role_for(self.request.user) == UserProfile.Role.TEACHER and not self.request.user.tala_profile.assigned_subjects.filter(pk=subject.id).exists():
-            raise PermissionDenied("You are not assigned to this assessment subject.")
+        assigned_classes = None
+        if role_for(self.request.user) == UserProfile.Role.TEACHER:
+            profile = self.request.user.tala_profile
+            if not profile.assigned_subjects.filter(pk=subject.id).exists():
+                raise PermissionDenied("You are not assigned to this assessment subject.")
+            assigned_classes = profile.assigned_classes.filter(is_active=True, grade_level=subject.grade_level)
+            serializer.validated_data.pop("assigned_classes", None)
         assessment = serializer.save()
+        if assigned_classes is not None:
+            assessment.assigned_classes.set(assigned_classes)
         if assessment.is_active and not was_active:
             students = get_user_model().objects.filter(tala_profile__role=UserProfile.Role.STUDENT, tala_profile__academic_class__in=assessment.assigned_classes.all()).distinct()
             for student in students:
                 notify(recipient=student, kind=Notification.Kind.CONTENT_PUBLISHED, title="Assessment assigned", message=f"{assessment.title} is now available.", action_url="/assessments", deduplication_key=f"assessment:{assessment.id}:assigned:student:{student.id}")
+
+    def destroy(self, request, *args, **kwargs):
+        assessment = self.get_object()
+        if assessment.is_active:
+            return Response({"detail": "Return the assessment to draft before deleting it."}, status=status.HTTP_409_CONFLICT)
+        if assessment.assessmentattempt_set.exists() or assessment.eligibilities.exists() or assessment.remedial_consents.exists():
+            return Response({"detail": "This assessment has learner records and must be retained as an academic record."}, status=status.HTTP_409_CONFLICT)
+        assessment_id = assessment.id
+        assessment_title = assessment.title
+        assessment.delete()
+        AuditEvent.objects.create(actor=request.user, action="assessment.deleted", object_type="Assessment", object_id=str(assessment_id), metadata={"title": assessment_title})
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"], url_path="questions")
     def add_question(self, request, pk=None):
@@ -596,14 +649,19 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         AuditEvent.objects.create(actor=request.user, action="assessment.question_added", object_type="Question", object_id=str(question.id), metadata={"assessment_id": assessment.id})
         return Response(QuestionEditorSerializer(question).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=["patch"], url_path=r"questions/(?P<question_id>[^/.]+)")
+    @action(detail=True, methods=["patch", "delete"], url_path=r"questions/(?P<question_id>[^/.]+)")
     def edit_question(self, request, pk=None, question_id=None):
         assessment = self.get_object()
         if assessment.is_active:
-            return Response({"detail": "Return the assessment to draft before editing questions."}, status=status.HTTP_409_CONFLICT)
+            return Response({"detail": "Return the assessment to draft before changing questions."}, status=status.HTTP_409_CONFLICT)
         question = assessment.questions.filter(pk=question_id).first()
         if not question:
             return Response({"detail": "Assessment question not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.method == "DELETE":
+            deleted_id = question.id
+            question.delete()
+            AuditEvent.objects.create(actor=request.user, action="assessment.question_deleted", object_type="Question", object_id=str(deleted_id), metadata={"assessment_id": assessment.id})
+            return Response(status=status.HTTP_204_NO_CONTENT)
         serializer = QuestionEditorSerializer(question, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         competency = serializer.validated_data.get("competency", question.competency)
@@ -613,11 +671,114 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         AuditEvent.objects.create(actor=request.user, action="assessment.question_updated", object_type="Question", object_id=str(question.id), metadata={"assessment_id": assessment.id})
         return Response(QuestionEditorSerializer(question).data)
 
+    @action(detail=True, methods=["post"], url_path="generate-questions")
+    def generate_questions(self, request, pk=None):
+        assessment = self.get_object()
+        if role_for(request.user) != UserProfile.Role.TEACHER:
+            raise PermissionDenied("Only teachers can generate assessment questions with AI.")
+        if assessment.is_active:
+            return Response({"detail": "Return the assessment to draft before generating questions."}, status=status.HTTP_409_CONFLICT)
+        if not request.user.tala_profile.assigned_subjects.filter(pk=assessment.subject_id).exists():
+            raise PermissionDenied("You are not assigned to this assessment subject.")
+        try:
+            competency_ids = {int(value) for value in request.data.get("competency_ids", [])}
+            count = int(request.data.get("count", 4))
+        except (TypeError, ValueError):
+            return Response({"detail": "Choose valid competencies and a question count."}, status=status.HTTP_400_BAD_REQUEST)
+        question_type = str(request.data.get("question_type", Question.QuestionType.MULTIPLE_CHOICE))
+        try:
+            resource_ids = {int(value) for value in request.data.get("resource_ids", [])}
+        except (TypeError, ValueError):
+            return Response({"resource_ids": "Choose valid approved learning materials."}, status=status.HTTP_400_BAD_REQUEST)
+        if not competency_ids:
+            return Response({"competency_ids": "Select at least one competency."}, status=status.HTTP_400_BAD_REQUEST)
+        if count < 1 or count > 12:
+            return Response({"count": "Generate between 1 and 12 questions at a time."}, status=status.HTTP_400_BAD_REQUEST)
+        if question_type not in Question.QuestionType.values:
+            return Response({"question_type": "Choose a supported question type."}, status=status.HTTP_400_BAD_REQUEST)
+        competencies = list(Competency.objects.filter(id__in=competency_ids, subject=assessment.subject, is_active=True).order_by("code"))
+        if len(competencies) != len(competency_ids):
+            return Response({"competency_ids": "Every competency must be active and belong to the selected teaching workspace."}, status=status.HTTP_400_BAD_REQUEST)
+        competency_context = "\n".join(f"- {item.code}: {item.title}" for item in competencies)
+        resources = list(LearningResource.objects.filter(id__in=resource_ids, is_approved=True, competencies__subject=assessment.subject).prefetch_related("chunks", "practice_questions").distinct())
+        if len(resources) != len(resource_ids):
+            return Response({"resource_ids": "Every selected source must be an approved material from this teaching workspace."}, status=status.HTTP_400_BAD_REQUEST)
+        source_context = "\n\n".join(f"SOURCE {resource.id} — {resource.title}\n" + "\n".join(chunk.content for chunk in list(resource.chunks.all())[:5]) for resource in resources)
+        type_guidance = {
+            Question.QuestionType.MULTIPLE_CHOICE: "Use exactly four plausible options and make correct_answer exactly match one option.",
+            Question.QuestionType.TRUE_FALSE: 'Use options ["True", "False"] and make correct_answer exactly "True" or "False".',
+            Question.QuestionType.SHORT_ANSWER: "Use an empty options list and a concise, unambiguous correct_answer.",
+        }[question_type]
+        prompt = f"""Create exactly {count} {Question.QuestionType(question_type).label.lower()} assessment questions for the teaching workspace {assessment.subject.name} (Grade {assessment.subject.grade_level}).
+Distribute the questions across only these selected competencies:
+{competency_context}
+
+{type_guidance}
+Return JSON only with this shape:
+{{"questions":[{{"competency_code":"code above","prompt":"...","question_type":"{question_type}","options":["..."],"correct_answer":"..."}}]}}
+Keep wording age-appropriate, avoid trick questions, and do not duplicate a question."""
+        if source_context:
+            prompt += f"\n\nGround every question in these approved learning materials. Do not copy their learning-quiz questions verbatim:\n{source_context[:24000]}"
+        try:
+            generated = get_llm_provider().generate(LLMRequest(
+                system="You are an assessment-writing assistant. Follow the requested curriculum scope exactly and return valid JSON only.",
+                messages=[{"role": "user", "content": prompt}], temperature=0.2, max_tokens=2400,
+            ))
+        except (LLMUnavailable, ValueError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        raw = generated.text.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE)
+        try:
+            payload = json.loads(raw)
+            generated_rows = payload.get("questions")
+        except (json.JSONDecodeError, AttributeError):
+            generated_rows = None
+        if not isinstance(generated_rows, list) or len(generated_rows) != count:
+            return Response({"detail": "The AI response could not be validated. Please try generating again."}, status=status.HTTP_502_BAD_GATEWAY)
+        competency_by_code = {item.code.casefold(): item for item in competencies}
+        source_quiz_prompts = {
+            re.sub(r"\W+", " ", question.prompt.casefold()).strip()
+            for resource in resources
+            for question in resource.practice_questions.all()
+        }
+        validated = []
+        for row in generated_rows:
+            if not isinstance(row, dict):
+                return Response({"detail": "The AI response contained an invalid question."}, status=status.HTTP_502_BAD_GATEWAY)
+            competency = competency_by_code.get(str(row.get("competency_code", "")).strip().casefold())
+            options = row.get("options", [])
+            prompt_text = str(row.get("prompt", "")).strip()
+            correct_answer = str(row.get("correct_answer", "")).strip()
+            if not competency or not prompt_text or not correct_answer or not isinstance(options, list):
+                return Response({"detail": "The AI response contained an incomplete or out-of-scope question."}, status=status.HTTP_502_BAD_GATEWAY)
+            if re.sub(r"\W+", " ", prompt_text.casefold()).strip() in source_quiz_prompts:
+                return Response({"detail": "The AI copied a learning-quiz question. Generate a new draft so the formal assessment remains independent."}, status=status.HTTP_502_BAD_GATEWAY)
+            options = [str(option).strip() for option in options if str(option).strip()]
+            if question_type == Question.QuestionType.TRUE_FALSE:
+                options = ["True", "False"]
+            if question_type == Question.QuestionType.SHORT_ANSWER:
+                options = []
+            elif len(options) < 2 or correct_answer not in options:
+                return Response({"detail": "The AI response contained invalid answer choices."}, status=status.HTTP_502_BAD_GATEWAY)
+            serializer = QuestionEditorSerializer(data={"competency": competency.id, "prompt": prompt_text, "question_type": question_type, "options": options, "correct_answer": correct_answer})
+            serializer.is_valid(raise_exception=True)
+            validated.append(serializer)
+        with transaction.atomic():
+            questions = [serializer.save(assessment=assessment, generation_metadata={"provider": generated.provider, "model": generated.model, "source_resource_ids": sorted(resource_ids), "review_status": "teacher_review_required"}) for serializer in validated]
+            for question in questions:
+                question.source_resources.set(resources)
+            AuditEvent.objects.create(actor=request.user, action="assessment.questions_generated", object_type="Assessment", object_id=str(assessment.id), metadata={"competency_ids": sorted(competency_ids), "resource_ids": sorted(resource_ids), "count": len(questions), "provider": generated.provider, "model": generated.model})
+        return Response({"questions": QuestionEditorSerializer(questions, many=True).data, "provider": generated.provider, "model": generated.model}, status=status.HTTP_201_CREATED)
+
     def _post_assessment_ready(self, assessment, user, target_competency_id=None):
         if assessment.kind not in {Assessment.Kind.POST, Assessment.Kind.REMEDIAL}:
             return True
         competency_ids = [target_competency_id] if target_competency_id else assessment.questions.values_list("competency_id", flat=True)
         return not RecoveryActivity.objects.filter(plan__student=user, plan__status="active", plan__competency_id__in=competency_ids, resource__isnull=False, completed_at__isnull=True).exists()
+
+    def _diagnostic_ready(self, assessment, user):
+        return assessment.kind != Assessment.Kind.PRE or not incomplete_prerequisite_assignments(assessment, user).exists()
 
     def _remedial_consent_ready(self, assessment, user):
         return assessment.kind != Assessment.Kind.REMEDIAL or assessment.remedial_consents.filter(student=user, status=RemedialExamConsent.Status.APPROVED).exists()
@@ -634,6 +795,12 @@ class AssessmentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You are not assigned to this learner's class.")
         if not self._post_assessment_ready(assessment, student):
             return Response({"detail": "The learner must complete the required recovery activities before consent is requested."}, status=status.HTTP_409_CONFLICT)
+        eligibility, _ = AssessmentEligibility.objects.get_or_create(assessment=assessment, student=student)
+        eligibility.status = AssessmentEligibility.Status.ELIGIBLE
+        eligibility.reason = str(request.data.get("eligibility_reason", eligibility.reason or "Teacher confirmed remedial examination is required."))
+        eligibility.reviewed_by = request.user
+        eligibility.reviewed_at = timezone.now()
+        eligibility.save(update_fields=["status", "reason", "reviewed_by", "reviewed_at"])
         guardian = GuardianContact.objects.filter(pk=request.data.get("guardian_id"), profile=student.tala_profile).first() if request.data.get("guardian_id") else student.tala_profile.guardian_contacts.first()
         guardian_name = guardian.name if guardian else str(request.data.get("guardian_name", "")).strip()
         guardian_relationship = guardian.relationship if guardian else str(request.data.get("guardian_relationship", "")).strip()
@@ -652,22 +819,52 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         AuditEvent.objects.create(actor=request.user, action="remedial_consent.requested", object_type="RemedialExamConsent", object_id=str(consent.id), metadata={"assessment_id": assessment.id, "student_id": student.id, "guardian_email": guardian_email})
         return Response({"id": consent.id, "status": consent.status, "guardian_name": guardian_name, "guardian_email": guardian_email, "requested_at": consent.requested_at}, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=["post"], url_path="eligibility")
+    def set_eligibility(self, request, pk=None):
+        assessment = self.get_object()
+        if assessment.kind != Assessment.Kind.REMEDIAL:
+            return Response({"detail": "Individual eligibility applies only to remedial assessments."}, status=status.HTTP_409_CONFLICT)
+        student = get_user_model().objects.filter(pk=request.data.get("student"), tala_profile__role=UserProfile.Role.STUDENT, tala_profile__academic_class__in=assessment.assigned_classes.all()).first()
+        if not student:
+            return Response({"student": "Choose a learner assigned to this assessment."}, status=status.HTTP_400_BAD_REQUEST)
+        if role_for(request.user) == UserProfile.Role.TEACHER and not request.user.tala_profile.assigned_classes.filter(pk=student.tala_profile.academic_class_id).exists():
+            raise PermissionDenied("You are not assigned to this learner's class.")
+        next_status = str(request.data.get("status", ""))
+        if next_status not in {AssessmentEligibility.Status.ELIGIBLE, AssessmentEligibility.Status.EXEMPTED}:
+            return Response({"status": "Choose eligible or exempted."}, status=status.HTTP_400_BAD_REQUEST)
+        eligibility, _ = AssessmentEligibility.objects.update_or_create(assessment=assessment, student=student, defaults={"status": next_status, "reason": str(request.data.get("reason", "")), "reviewed_by": request.user, "reviewed_at": timezone.now()})
+        return Response({"id": eligibility.id, "student": student.id, "status": eligibility.status, "reason": eligibility.reason})
+
     @action(detail=True, methods=["get"])
     def start(self, request, pk=None):
         assessment = self.get_object()
         if role_for(request.user) != "student":
             return Response({"detail": "Only students can start an assessment."}, status=status.HTTP_403_FORBIDDEN)
         target_competency_id = request.query_params.get("competency")
+        if not self._diagnostic_ready(assessment, request.user):
+            return Response({"detail": "Complete the required learning materials before starting this diagnostic assessment."}, status=status.HTTP_409_CONFLICT)
+        if assessment.kind == Assessment.Kind.REMEDIAL and not remedial_student_is_eligible(assessment, request.user):
+            return Response({"detail": "This remedial assessment is not assigned to you."}, status=status.HTTP_403_FORBIDDEN)
         if not self._post_assessment_ready(assessment, request.user, target_competency_id):
             return Response({"detail": "Complete the required recovery activities before starting this mastery assessment."}, status=status.HTTP_409_CONFLICT)
         if not self._remedial_consent_ready(assessment, request.user):
             return Response({"detail": "Verified parent or legal-guardian consent is required before starting this remedial exam."}, status=status.HTTP_409_CONFLICT)
         if target_competency_id and not assessment.questions.filter(competency_id=target_competency_id).exists():
             return Response({"detail": "This assessment does not contain a mastery check for the selected competency."}, status=status.HTTP_400_BAD_REQUEST)
+        target_question_ids = []
+        if request.query_params.get("questions"):
+            try:
+                target_question_ids = sorted({int(value) for value in request.query_params["questions"].split(",") if value})
+            except ValueError:
+                return Response({"detail": "Retry question identifiers must be valid integers."}, status=status.HTTP_400_BAD_REQUEST)
+            latest_attempt = AssessmentAttempt.objects.filter(assessment=assessment, student=request.user, submitted_at__isnull=False, answers__question__competency_id=target_competency_id).distinct().order_by("-submitted_at", "-id").first()
+            expected_ids = set(latest_attempt.answers.filter(is_correct=False, question__competency_id=target_competency_id).values_list("question_id", flat=True)) if latest_attempt else set()
+            if not expected_ids or set(target_question_ids) != expected_ids:
+                return Response({"detail": "Only the questions missed in your latest mastery attempt can be retried."}, status=status.HTTP_400_BAD_REQUEST)
         attempt = AssessmentAttempt.objects.filter(assessment=assessment, student=request.user, submitted_at__isnull=True).first()
         if attempt is None:
             attempt = AssessmentAttempt.objects.create(assessment=assessment, student=request.user)
-        return Response({"attempt_id": attempt.id, "assessment": AssessmentDetailSerializer(assessment, context={"request": request, "target_competency_id": target_competency_id}).data})
+        return Response({"attempt_id": attempt.id, "assessment": AssessmentDetailSerializer(assessment, context={"request": request, "target_competency_id": target_competency_id, "target_question_ids": target_question_ids}).data})
 
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
@@ -675,6 +872,10 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         if role_for(request.user) != "student":
             return Response({"detail": "Only students can submit assessments."}, status=status.HTTP_403_FORBIDDEN)
         target_competency_id = request.data.get("competency")
+        if not self._diagnostic_ready(assessment, request.user):
+            return Response({"detail": "Complete the required learning materials before submitting this diagnostic assessment."}, status=status.HTTP_409_CONFLICT)
+        if assessment.kind == Assessment.Kind.REMEDIAL and not remedial_student_is_eligible(assessment, request.user):
+            return Response({"detail": "This remedial assessment is not assigned to you."}, status=status.HTTP_403_FORBIDDEN)
         if not self._post_assessment_ready(assessment, request.user, target_competency_id):
             return Response({"detail": "Complete the required recovery activities before submitting this mastery assessment."}, status=status.HTTP_409_CONFLICT)
         if not self._remedial_consent_ready(assessment, request.user):
@@ -687,6 +888,19 @@ class AssessmentViewSet(viewsets.ModelViewSet):
             question_queryset = question_queryset.filter(competency_id=target_competency_id)
             if not question_queryset.exists():
                 return Response({"detail": "This assessment does not contain a mastery check for the selected competency."}, status=status.HTTP_400_BAD_REQUEST)
+        requested_question_ids = request.data.get("question_ids")
+        if requested_question_ids is not None:
+            try:
+                requested_question_ids = {int(value) for value in requested_question_ids}
+            except (TypeError, ValueError):
+                return Response({"question_ids": "Retry question identifiers must be valid integers."}, status=status.HTTP_400_BAD_REQUEST)
+            all_target_ids = set(question_queryset.values_list("id", flat=True))
+            if requested_question_ids != all_target_ids:
+                latest_attempt = AssessmentAttempt.objects.filter(assessment=assessment, student=request.user, submitted_at__isnull=False, answers__question__competency_id=target_competency_id).distinct().order_by("-submitted_at", "-id").first()
+                expected_ids = set(latest_attempt.answers.filter(is_correct=False, question__competency_id=target_competency_id).values_list("question_id", flat=True)) if latest_attempt else set()
+                if not expected_ids or requested_question_ids != expected_ids:
+                    return Response({"question_ids": "Only the questions missed in your latest mastery attempt can be submitted."}, status=status.HTTP_400_BAD_REQUEST)
+                question_queryset = question_queryset.filter(id__in=requested_question_ids)
         questions = {q.id: q for q in question_queryset}
         try:
             answer_map = {int(item.get("question_id")): str(item.get("answer", "")) for item in supplied if item.get("question_id")}
@@ -720,6 +934,12 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                         completed_plans = RecoveryPlan.objects.filter(student=request.user, competency=result.competency, status="active")
                         RecoveryActivity.objects.filter(plan__in=completed_plans, resource__isnull=True, completed_at__isnull=True).update(completed_at=timezone.now())
                         completed_plans.update(status="completed")
+                if assessment.kind == Assessment.Kind.POST and any(result.status != CompetencyResult.Status.MASTERED for result in results):
+                    remedial_assessments = Assessment.objects.filter(kind=Assessment.Kind.REMEDIAL, subject=assessment.subject, assigned_classes=request.user.tala_profile.academic_class, is_active=True).distinct()
+                    for remedial in remedial_assessments:
+                        AssessmentEligibility.objects.get_or_create(assessment=remedial, student=request.user, defaults={"status": AssessmentEligibility.Status.RECOMMENDED, "reason": f"Mastery check {assessment.title} still shows an unmet competency."})
+                if assessment.kind == Assessment.Kind.REMEDIAL:
+                    AssessmentEligibility.objects.filter(assessment=assessment, student=request.user).update(status=AssessmentEligibility.Status.COMPLETED)
             notify(recipient=request.user, kind=Notification.Kind.ASSESSMENT_RESULT, title="Assessment submitted", message=f"Your score for {assessment.title} is {round(float(attempt.score))}%.", action_url="/assessments", deduplication_key=f"assessment-attempt:{attempt.id}:student")
             for teacher in assigned_teachers_for(request.user):
                 notify(recipient=teacher, kind=Notification.Kind.ASSESSMENT_RESULT, title="Learner assessment submitted", message=f"{request.user.get_full_name() or request.user.username} scored {round(float(attempt.score))}% on {assessment.title}.", action_url=f"/learners/{request.user.id}", deduplication_key=f"assessment-attempt:{attempt.id}:teacher:{teacher.id}")
@@ -877,21 +1097,51 @@ def student_dashboard(request):
         attempts = attempts.filter(assessment__subject_id=subject_id)
         results = results.filter(competency__subject_id=subject_id)
         competencies = competencies.filter(subject_id=subject_id)
+    pending_diagnostics = Assessment.objects.filter(kind=Assessment.Kind.PRE, is_active=True, assigned_classes=academic_class) if academic_class else Assessment.objects.none()
+    completed_diagnostic_ids = AssessmentAttempt.objects.filter(student=request.user, submitted_at__isnull=False, assessment__kind=Assessment.Kind.PRE).values_list("assessment_id", flat=True)
+    pending_diagnostics = pending_diagnostics.exclude(id__in=completed_diagnostic_ids)
+    if subject_id := request.query_params.get("subject"):
+        pending_diagnostics = pending_diagnostics.filter(subject_id=subject_id)
+    pending_diagnostic = pending_diagnostics.order_by("due_at", "id").first()
+    pending_prerequisites = list(incomplete_prerequisite_assignments(pending_diagnostic, request.user).select_related("resource")) if pending_diagnostic else []
     mastered = results.values("competency_id").distinct().count()
     total = competencies.distinct().count()
-    return Response({"mastered": mastered, "total_competencies": total, "plans": RecoveryPlanSerializer(plans, many=True).data, "attempts": AssessmentAttemptSerializer(attempts, many=True).data})
+    return Response({
+        "academic_class": {
+            "id": academic_class.id,
+            "label": str(academic_class),
+            "subject_name": selected_subject.name if (selected_subject := Subject.objects.filter(pk=request.query_params.get("subject"), is_active=True, grade_level=academic_class.grade_level).first()) else None,
+            "class_code": f"{selected_subject.code}-{academic_class.class_code}" if selected_subject else None,
+        } if academic_class else None,
+        "mastered": mastered,
+        "total_competencies": total,
+        "plans": RecoveryPlanSerializer(plans, many=True).data,
+        "attempts": AssessmentAttemptSerializer(attempts, many=True).data,
+        "pending_diagnostic": {
+            "id": pending_diagnostic.id,
+            "title": pending_diagnostic.title,
+            "question_count": pending_diagnostic.questions.count(),
+            "due_at": pending_diagnostic.due_at,
+            "remaining_prerequisites": len(pending_prerequisites),
+            "prerequisite_titles": [item.resource.title for item in pending_prerequisites],
+        } if pending_diagnostic else None,
+    })
 
 
 @api_view(["GET"])
 @permission_classes([IsStudent])
 def student_context(request):
     academic_class = request.user.tala_profile.academic_class
+    learner_grade = getattr(getattr(request.user.tala_profile, "student_details", None), "grade_level", academic_class.grade_level if academic_class else None)
     subject_ids = set(RecoveryPlan.objects.filter(student=request.user).values_list("competency__subject_id", flat=True))
     subject_ids.update(AssessmentAttempt.objects.filter(student=request.user, submitted_at__isnull=False).values_list("assessment__subject_id", flat=True))
     if academic_class:
         subject_ids.update(Assessment.objects.filter(is_active=True, assigned_classes=academic_class).values_list("subject_id", flat=True))
         subject_ids.update(LearningAssignment.objects.filter(is_active=True, resource__is_approved=True, assigned_classes=academic_class).values_list("resource__competencies__subject_id", flat=True))
-    subjects = Subject.objects.filter(id__in=subject_ids, is_active=True).order_by("grade_level", "name")
+    subjects = Subject.objects.filter(id__in=subject_ids, is_active=True)
+    if learner_grade:
+        subjects = subjects.filter(grade_level=learner_grade)
+    subjects = subjects.order_by("grade_level", "name")
     return Response({"subjects": SubjectSerializer(subjects, many=True).data})
 
 @api_view(["GET"])
@@ -902,6 +1152,10 @@ def teacher_learners(request):
     subject_ids = None
     if role_for(request.user) == "teacher":
         students = students.filter(tala_profile__academic_class__in=request.user.tala_profile.assigned_classes.all())
+        if class_id := request.query_params.get("class"):
+            if not request.user.tala_profile.assigned_classes.filter(pk=class_id).exists():
+                return Response({"class": "Choose one of your assigned teaching classes."}, status=status.HTTP_403_FORBIDDEN)
+            students = students.filter(tala_profile__academic_class_id=class_id)
         allowed_subject_ids = set(request.user.tala_profile.assigned_subjects.values_list("id", flat=True))
         requested_subject_id = request.query_params.get("subject")
         if requested_subject_id:
@@ -998,6 +1252,7 @@ def teacher_material_analytics(request):
             "id": assignment.id,
             "title": assignment.resource.title,
             "resource_type": assignment.resource.resource_type,
+            "purpose": assignment.resource.purpose,
             "quiz_question_count": assignment.resource.practice_questions.count(),
             "assigned": len(students),
             **counts,
@@ -1140,7 +1395,8 @@ def teacher_learner_detail(request, student_id):
         competency_ids = assessment.questions.values_list("competency_id", flat=True)
         remaining = RecoveryActivity.objects.filter(plan__student=student, plan__status="active", plan__competency_id__in=competency_ids, resource__isnull=False, completed_at__isnull=True).count()
         consent = assessment.remedial_consents.filter(student=student).first()
-        remedial_rows.append({"id": assessment.id, "title": assessment.title, "eligible": remaining == 0, "remaining_activities": remaining, "consent_status": consent.status if consent else "not_requested", "guardian_name": consent.guardian_name if consent else "", "requested_at": consent.requested_at if consent else None, "evidence_attached": bool(consent and consent.evidence_file)})
+        eligibility = assessment.eligibilities.filter(student=student).first()
+        remedial_rows.append({"id": assessment.id, "title": assessment.title, "eligible": remaining == 0, "eligibility_status": eligibility.status if eligibility else "not_recommended", "eligibility_reason": eligibility.reason if eligibility else "", "remaining_activities": remaining, "consent_status": consent.status if consent else "not_requested", "guardian_name": consent.guardian_name if consent else "", "requested_at": consent.requested_at if consent else None, "evidence_attached": bool(consent and consent.evidence_file)})
     guardians = list(student.tala_profile.guardian_contacts.values("id", "name", "relationship", "phone", "email"))
     return Response({"student": {"id": student.id, "name": student.get_full_name() or student.username, "email": student.email, "section": str(student.tala_profile.academic_class) if student.tala_profile.academic_class else "Unassigned"}, "plans": RecoveryPlanSerializer(plans, many=True).data, "attempts": AssessmentAttemptSerializer(attempts, many=True).data, "evidence": LearnerCompetencyEvidenceSerializer(evidence, many=True).data, "interventions": InterventionSerializer(interventions, many=True).data, "guardians": guardians, "remedial_exams": remedial_rows, "recommendations": _recommendation_rows(student, plans.filter(status="active"))})
 
@@ -1216,7 +1472,14 @@ class ContentImportViewSet(viewsets.ModelViewSet):
                 notify(recipient=administrator, kind=Notification.Kind.CONTENT_REVIEW, title="Content awaiting review", message=f"{content_import.uploaded_by.get_full_name() or content_import.uploaded_by.email} submitted {content_import.title}.", action_url=f"/imports/{content_import.id}", deduplication_key=f"content-import:{content_import.id}:review:{administrator.id}")
 
     def perform_create(self, serializer):
-        self._notify_reviewers(process_content_import(serializer.save()))
+        content_import = serializer.save()
+        if content_import.kind == ContentImport.Kind.VIDEO:
+            from .tasks import process_video_content_import
+            process_video_content_import.delay(content_import.id)
+            content_import.refresh_from_db()
+        else:
+            content_import = process_content_import(content_import)
+            self._notify_reviewers(content_import)
 
     def partial_update(self, request, *args, **kwargs):
         content_import = self.get_object()
@@ -1285,6 +1548,8 @@ class ContentImportViewSet(viewsets.ModelViewSet):
         classes = AcademicClass.objects.filter(id__in=class_ids, is_active=True)
         if classes.count() != len(class_ids):
             return Response({"assigned_class_ids": "One or more classes are unavailable."}, status=status.HTTP_400_BAD_REQUEST)
+        if classes.exclude(grade_level=content_import.subject.grade_level).exists():
+            return Response({"assigned_class_ids": f"{content_import.subject.name} can be assigned only to Grade {content_import.subject.grade_level} classes."}, status=status.HTTP_400_BAD_REQUEST)
         if role_for(request.user) == UserProfile.Role.TEACHER:
             allowed = set(request.user.tala_profile.assigned_classes.values_list("id", flat=True))
             if not class_ids.issubset(allowed):
@@ -1350,6 +1615,172 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     def read_all(self, request):
         self.get_queryset().filter(read_at__isnull=True).update(read_at=timezone.now())
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["delete"], url_path="dismiss")
+    def dismiss(self, request, pk=None):
+        notification = self.get_object()
+        AuditEvent.objects.create(actor=request.user, action="notification.dismissed", object_type="Notification", object_id=str(notification.pk), metadata={"kind": notification.kind})
+        notification.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class EnrollmentRequestViewSet(viewsets.ModelViewSet):
+    serializer_class = EnrollmentRequestSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        queryset = EnrollmentRequest.objects.select_related("student", "academic_class", "subject", "requested_by", "reviewed_by")
+        role = role_for(self.request.user)
+        if role == UserProfile.Role.STUDENT:
+            return queryset.filter(student=self.request.user)
+        if role == UserProfile.Role.TEACHER:
+            return queryset.filter(academic_class__in=self.request.user.tala_profile.assigned_classes.all(), subject__in=self.request.user.tala_profile.assigned_subjects.all())
+        if role == UserProfile.Role.ADMIN:
+            return queryset
+        return queryset.none()
+
+    def create(self, request, *args, **kwargs):
+        role = role_for(request.user)
+        subject = None
+        if role == UserProfile.Role.STUDENT:
+            class_code = str(request.data.get("class_code", "")).strip().upper()
+            subject_code, separator, section_code = class_code.rpartition("-")
+            subject = Subject.objects.filter(code__iexact=subject_code, is_active=True).first() if separator else None
+            academic_class = AcademicClass.objects.filter(class_code__iexact=section_code, is_active=True).first() if subject else None
+            if not academic_class or subject.grade_level != academic_class.grade_level:
+                return Response({"class_code": "No active subject and section match this enrollment code."}, status=status.HTTP_400_BAD_REQUEST)
+            student = request.user
+            source = EnrollmentRequest.Source.STUDENT
+            request_status = EnrollmentRequest.Status.PENDING
+            decision_reason = ""
+        elif role in {UserProfile.Role.TEACHER, UserProfile.Role.ADMIN}:
+            student = get_user_model().objects.filter(pk=request.data.get("student"), tala_profile__role=UserProfile.Role.STUDENT, is_active=True).first()
+            academic_class = AcademicClass.objects.filter(pk=request.data.get("academic_class"), is_active=True).first()
+            if not student or not academic_class:
+                return Response({"detail": "Choose an active student and ARAL class."}, status=status.HTTP_400_BAD_REQUEST)
+            subject = Subject.objects.filter(pk=request.data.get("subject"), is_active=True, grade_level=academic_class.grade_level).first()
+            if role == UserProfile.Role.TEACHER and (not subject or not request.user.tala_profile.assigned_subjects.filter(pk=subject.pk).exists()):
+                return Response({"subject": "Choose your current teaching subject."}, status=status.HTTP_400_BAD_REQUEST)
+            if role == UserProfile.Role.TEACHER and not request.user.tala_profile.assigned_classes.filter(pk=academic_class.pk).exists():
+                raise PermissionDenied("You may enroll learners only into your assigned classes.")
+            if role == UserProfile.Role.TEACHER and student.tala_profile.academic_class_id and not request.user.tala_profile.assigned_classes.filter(pk=student.tala_profile.academic_class_id).exists():
+                raise PermissionDenied("An administrator must override a learner's enrollment outside your assigned classes.")
+            decision_reason = str(request.data.get("decision_reason", "")).strip()
+            if role == UserProfile.Role.ADMIN and not decision_reason:
+                return Response({"decision_reason": "Record why an administrator override is required."}, status=status.HTTP_400_BAD_REQUEST)
+            source = EnrollmentRequest.Source.TEACHER if role == UserProfile.Role.TEACHER else EnrollmentRequest.Source.ADMIN
+            request_status = EnrollmentRequest.Status.APPROVED
+        else:
+            raise PermissionDenied("This account cannot manage enrollment.")
+        student_details, _ = StudentProfile.objects.get_or_create(profile=student.tala_profile, defaults={"grade_level": academic_class.grade_level})
+        if student_details.grade_level != academic_class.grade_level:
+            return Response({"academic_class": f"Choose a Grade {student_details.grade_level} ARAL class for this learner."}, status=status.HTTP_400_BAD_REQUEST)
+        if student.tala_profile.academic_class_id:
+            return Response({"detail": "Unenroll the learner from the current class before enrolling them in another class."}, status=status.HTTP_409_CONFLICT)
+        if EnrollmentRequest.objects.filter(student=student, academic_class=academic_class, subject=subject, status=EnrollmentRequest.Status.PENDING).exists():
+            return Response({"detail": "A pending request already exists for this subject and class."}, status=status.HTTP_409_CONFLICT)
+        with transaction.atomic():
+            row = EnrollmentRequest.objects.create(student=student, academic_class=academic_class, subject=subject, source=source, status=request_status, requested_by=request.user, reviewed_by=request.user if request_status == EnrollmentRequest.Status.APPROVED else None, reviewed_at=timezone.now() if request_status == EnrollmentRequest.Status.APPROVED else None, decision_reason=decision_reason)
+            if request_status == EnrollmentRequest.Status.APPROVED:
+                student.tala_profile.academic_class = academic_class
+                student.tala_profile.save(update_fields=["academic_class"])
+                details, _ = StudentProfile.objects.get_or_create(profile=student.tala_profile)
+                if details.grade_level != academic_class.grade_level:
+                    details.grade_level = academic_class.grade_level
+                    details.save(update_fields=["grade_level"])
+        subject_label = f" for {subject.name}" if subject else ""
+        notify(recipient=student, kind=Notification.Kind.INTERVENTION, title="ARAL enrollment updated" if request_status == EnrollmentRequest.Status.APPROVED else "ARAL enrollment requested", message=f"You have been enrolled in {academic_class}{subject_label}." if request_status == EnrollmentRequest.Status.APPROVED else f"Your request to join {academic_class}{subject_label} is awaiting approval.", action_url="/profile", deduplication_key=f"enrollment:{row.id}:{request_status}:student")
+        if request_status == EnrollmentRequest.Status.PENDING:
+            reviewers = get_user_model().objects.filter(Q(tala_profile__role=UserProfile.Role.TEACHER, tala_profile__assigned_classes=academic_class, tala_profile__assigned_subjects=subject) | Q(tala_profile__role=UserProfile.Role.ADMIN), is_active=True, tala_profile__is_active=True).distinct()
+            for reviewer in reviewers:
+                notify(recipient=reviewer, kind=Notification.Kind.INTERVENTION, title="ARAL enrollment approval needed", message=f"{student.get_full_name() or student.email} requested to join {academic_class}.", action_url="/learners", deduplication_key=f"enrollment:{row.id}:reviewer:{reviewer.id}")
+        AuditEvent.objects.create(actor=request.user, action=f"enrollment.{request_status}", object_type="EnrollmentRequest", object_id=str(row.pk), metadata={"student_id": student.id, "class_id": academic_class.id, "source": source, "reason": decision_reason})
+        return Response(self.get_serializer(row).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def decide(self, request, pk=None):
+        row = self.get_object()
+        if row.status != EnrollmentRequest.Status.PENDING:
+            return Response({"detail": "This enrollment request has already been decided."}, status=status.HTTP_409_CONFLICT)
+        role = role_for(request.user)
+        if role == UserProfile.Role.TEACHER and not request.user.tala_profile.assigned_classes.filter(pk=row.academic_class_id).exists():
+            raise PermissionDenied("Only an assigned teacher or administrator may decide this request.")
+        if role == UserProfile.Role.TEACHER and row.subject_id and not request.user.tala_profile.assigned_subjects.filter(pk=row.subject_id).exists():
+            raise PermissionDenied("Only a teacher assigned to this subject may decide this request.")
+        if role not in {UserProfile.Role.TEACHER, UserProfile.Role.ADMIN}:
+            raise PermissionDenied("Only an assigned teacher or administrator may decide this request.")
+        decision = request.data.get("decision")
+        if decision not in {EnrollmentRequest.Status.APPROVED, EnrollmentRequest.Status.REJECTED}:
+            return Response({"decision": "Choose approved or rejected."}, status=status.HTTP_400_BAD_REQUEST)
+        reason = str(request.data.get("decision_reason", "")).strip()
+        if (decision == EnrollmentRequest.Status.REJECTED or role == UserProfile.Role.ADMIN) and not reason:
+            return Response({"decision_reason": "Record a reason for this decision."}, status=status.HTTP_400_BAD_REQUEST)
+        if decision == EnrollmentRequest.Status.APPROVED and row.student.tala_profile.academic_class_id:
+            return Response({"detail": "Unenroll the learner from the current class before approving this enrollment."}, status=status.HTTP_409_CONFLICT)
+        with transaction.atomic():
+            row.status = decision
+            row.reviewed_by = request.user
+            row.reviewed_at = timezone.now()
+            row.decision_reason = reason
+            row.save(update_fields=["status", "reviewed_by", "reviewed_at", "decision_reason"])
+            if decision == EnrollmentRequest.Status.APPROVED:
+                row.student.tala_profile.academic_class = row.academic_class
+                row.student.tala_profile.save(update_fields=["academic_class"])
+                details, _ = StudentProfile.objects.get_or_create(profile=row.student.tala_profile)
+                if details.grade_level != row.academic_class.grade_level:
+                    details.grade_level = row.academic_class.grade_level
+                    details.save(update_fields=["grade_level"])
+        notify(recipient=row.student, kind=Notification.Kind.INTERVENTION, title="ARAL enrollment request updated", message=f"Your request for {row.academic_class} was {decision}.", action_url="/profile", deduplication_key=f"enrollment:{row.id}:{decision}:student")
+        AuditEvent.objects.create(actor=request.user, action=f"enrollment.{decision}", object_type="EnrollmentRequest", object_id=str(row.pk), metadata={"student_id": row.student_id, "class_id": row.academic_class_id, "reason": reason})
+        return Response(self.get_serializer(row).data)
+
+    @action(detail=False, methods=["post"], url_path="unenroll")
+    def unenroll(self, request):
+        if role_for(request.user) not in {UserProfile.Role.TEACHER, UserProfile.Role.ADMIN}:
+            raise PermissionDenied("Only teachers and administrators may unenroll a learner.")
+        student = get_user_model().objects.filter(pk=request.data.get("student"), tala_profile__role=UserProfile.Role.STUDENT, is_active=True).select_related("tala_profile__academic_class").first()
+        if not student or not student.tala_profile.academic_class_id:
+            return Response({"student": "Choose a currently enrolled learner."}, status=status.HTTP_400_BAD_REQUEST)
+        previous_class = student.tala_profile.academic_class
+        role = role_for(request.user)
+        if role == UserProfile.Role.TEACHER and not request.user.tala_profile.assigned_classes.filter(pk=previous_class.id).exists():
+            raise PermissionDenied("You may unenroll learners only from your assigned class.")
+        reason = str(request.data.get("decision_reason", "")).strip()
+        if role == UserProfile.Role.ADMIN and not reason:
+            return Response({"decision_reason": "Record why an administrator override is required."}, status=status.HTTP_400_BAD_REQUEST)
+        student.tala_profile.academic_class = None
+        student.tala_profile.save(update_fields=["academic_class"])
+        notify(recipient=student, kind=Notification.Kind.INTERVENTION, title="ARAL enrollment updated", message=f"You have been unenrolled from {previous_class}. Contact your teacher if you need a new class assignment.", action_url="/profile", deduplication_key=f"enrollment:unenrolled:student:{student.id}:class:{previous_class.id}:{timezone.now().date()}")
+        AuditEvent.objects.create(actor=request.user, action="enrollment.unenrolled", object_type="User", object_id=str(student.id), metadata={"student_id": student.id, "class_id": previous_class.id, "reason": reason})
+        return Response({"detail": f"{student.get_full_name() or student.email} was unenrolled from {previous_class}."})
+
+    @action(detail=False, methods=["get"])
+    def candidates(self, request):
+        if role_for(request.user) not in {UserProfile.Role.TEACHER, UserProfile.Role.ADMIN}:
+            raise PermissionDenied("Only teachers and administrators may view enrollment candidates.")
+        students = get_user_model().objects.filter(tala_profile__role=UserProfile.Role.STUDENT, is_active=True, tala_profile__is_active=True).select_related("tala_profile__academic_class", "tala_profile__student_details").order_by("tala_profile__student_details__grade_level", "last_name", "first_name")
+        candidate_mode = request.query_params.get("mode", "enroll")
+        if candidate_mode not in {"enroll", "enrolled"}:
+            raise ValidationError({"mode": "Choose enroll or enrolled."})
+        students = students.filter(tala_profile__academic_class__isnull=candidate_mode == "enroll")
+        if role_for(request.user) == UserProfile.Role.TEACHER:
+            subject = request.user.tala_profile.assigned_subjects.filter(pk=request.query_params.get("subject"), is_active=True).first()
+            if not subject:
+                raise ValidationError({"subject": "Choose one of your assigned teaching subjects."})
+            students = students.filter(tala_profile__student_details__grade_level=subject.grade_level)
+            if candidate_mode == "enrolled":
+                students = students.filter(tala_profile__academic_class__in=request.user.tala_profile.assigned_classes.all())
+            students = students.distinct()
+        if grade := request.query_params.get("grade"):
+            if grade not in {"11", "12"}:
+                raise ValidationError({"grade": "Choose Grade 11 or Grade 12."})
+            students = students.filter(tala_profile__student_details__grade_level=int(grade))
+        rows = []
+        for item in students:
+            details = getattr(item.tala_profile, "student_details", None)
+            rows.append({"id": item.id, "name": item.get_full_name() or item.email, "email": item.email, "grade_level": details.grade_level if details else item.tala_profile.academic_class.grade_level if item.tala_profile.academic_class else 11, "academic_class": item.tala_profile.academic_class_id, "class_label": str(item.tala_profile.academic_class) if item.tala_profile.academic_class else "Not enrolled"})
+        return Response(rows)
 
 class DeviceRegistrationViewSet(viewsets.ModelViewSet):
     serializer_class = DeviceRegistrationSerializer

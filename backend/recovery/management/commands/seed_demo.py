@@ -128,7 +128,7 @@ class Command(BaseCommand):
             Question.objects.update_or_create(assessment=assessment, competency=competency, prompt=prompt, defaults={"question_type": Question.QuestionType.TRUE_FALSE if len(choices) == 2 else Question.QuestionType.MULTIPLE_CHOICE, "options": choices, "correct_answer": correct})
 
         post_assessment, _ = Assessment.objects.update_or_create(title="Fractions mastery assessment", defaults={"subject": subject, "kind": Assessment.Kind.POST, "is_active": True, "created_by": teacher})
-        post_assessment.assigned_classes.set([academic_class, bonifacio_class, mabini_class])
+        post_assessment.assigned_classes.set([academic_class, bonifacio_class])
         post_questions = [
             (competencies[2], "What is 2/3 + 1/4?", ["3/7", "11/12", "3/12", "8/12"], "11/12"),
             (competencies[2], "What is 1/2 + 2/5?", ["3/7", "9/10", "3/10", "7/10"], "9/10"),
@@ -139,7 +139,7 @@ class Command(BaseCommand):
             Question.objects.update_or_create(assessment=post_assessment, competency=competency, prompt=prompt, defaults={"question_type": Question.QuestionType.TRUE_FALSE if len(choices) == 2 else Question.QuestionType.MULTIPLE_CHOICE, "options": choices, "correct_answer": correct})
 
         remedial_assessment, _ = Assessment.objects.update_or_create(title="Fractions remedial exam", defaults={"subject": subject, "kind": Assessment.Kind.REMEDIAL, "instructions": "Complete this exam only after the recovery plan and verified parent/legal-guardian consent.", "is_active": True, "created_by": teacher})
-        remedial_assessment.assigned_classes.set([academic_class, bonifacio_class, mabini_class])
+        remedial_assessment.assigned_classes.set([academic_class, bonifacio_class])
         for competency, prompt, choices, correct in post_questions:
             remedial_prompt = f"Remedial: {prompt}"
             Question.objects.update_or_create(assessment=remedial_assessment, competency=competency, prompt=remedial_prompt, defaults={"question_type": Question.QuestionType.TRUE_FALSE if len(choices) == 2 else Question.QuestionType.MULTIPLE_CHOICE, "options": choices, "correct_answer": correct})
@@ -180,12 +180,25 @@ class Command(BaseCommand):
             ("luis.villanueva@tala.edu.ph", "Luis", "Villanueva", [True, True, False, True], 3),
         ]
         diagnostic_questions = list(assessment.questions.order_by("id"))
+        target_classes = {
+            "paolo.garcia@tala.edu.ph": bonifacio_class,
+            "sofia.mendoza@tala.edu.ph": bonifacio_class,
+            "carlo.ramos@tala.edu.ph": bonifacio_class,
+            "bea.navarro@tala.edu.ph": mabini_class,
+            "miguel.torres@tala.edu.ph": mabini_class,
+            "nina.flores@tala.edu.ph": mabini_class,
+            "luis.villanueva@tala.edu.ph": mabini_class,
+        }
         for index, (email, first_name, last_name, correct_pattern, completed_resource_count) in enumerate(additional_students, start=1):
             demo_student, _ = User.objects.get_or_create(username=email, defaults={"email": email, "first_name": first_name, "last_name": last_name})
             demo_student.email = email; demo_student.first_name = first_name; demo_student.last_name = last_name
             demo_student.set_password("demo-password"); demo_student.save()
             profile, _ = UserProfile.objects.get_or_create(user=demo_student, defaults={"role": UserProfile.Role.STUDENT})
-            profile.role = UserProfile.Role.STUDENT; profile.academic_class = academic_class; profile.is_active = True; profile.save()
+            profile.role = UserProfile.Role.STUDENT; profile.academic_class = target_classes.get(email, academic_class); profile.is_active = True; profile.save()
+            if profile.academic_class.grade_level != subject.grade_level:
+                AssessmentAttempt.objects.filter(student=demo_student, assessment__subject=subject).delete()
+                RecoveryPlan.objects.filter(student=demo_student, competency__subject=subject).delete()
+                continue
             if AssessmentAttempt.objects.filter(assessment=assessment, student=demo_student, submitted_at__isnull=False).exists():
                 continue
             attempt = AssessmentAttempt.objects.create(
@@ -209,19 +222,11 @@ class Command(BaseCommand):
                 activity.completed_at = completed_at; activity.save(update_fields=["completed_at"])
 
         # Spread the additional learners across the seeded classes for assignment and permission testing.
-        for email, target_class in {
-            "paolo.garcia@tala.edu.ph": bonifacio_class,
-            "sofia.mendoza@tala.edu.ph": bonifacio_class,
-            "carlo.ramos@tala.edu.ph": bonifacio_class,
-            "bea.navarro@tala.edu.ph": mabini_class,
-            "miguel.torres@tala.edu.ph": mabini_class,
-            "nina.flores@tala.edu.ph": mabini_class,
-            "luis.villanueva@tala.edu.ph": mabini_class,
-        }.items():
+        for email, target_class in target_classes.items():
             UserProfile.objects.filter(user__username=email).update(academic_class=target_class)
 
         for index, profile in enumerate(UserProfile.objects.filter(role=UserProfile.Role.STUDENT).order_by("user_id"), start=1):
-            StudentProfile.objects.update_or_create(profile=profile, defaults={"student_number": f"2026-{index:04d}", "learner_reference_number": f"100000000{index:03d}"})
+            StudentProfile.objects.update_or_create(profile=profile, defaults={"student_number": f"2026-{index:04d}", "learner_reference_number": f"100000000{index:03d}", "grade_level": profile.academic_class.grade_level if profile.academic_class else 11})
             GuardianContact.objects.update_or_create(profile=profile, name=f"Parent of {profile.user.first_name or 'Learner'}", defaults={"relationship": "Parent", "phone": f"0917000{index:04d}", "email": f"guardian{index}@example.com", "receives_progress_updates": True})
         for index, profile in enumerate(UserProfile.objects.exclude(role=UserProfile.Role.STUDENT).order_by("user_id"), start=1):
             EmployeeProfile.objects.update_or_create(profile=profile, defaults={"employee_id": f"EMP-2026-{index:03d}"})

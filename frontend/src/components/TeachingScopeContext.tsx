@@ -7,6 +7,9 @@ export type TeachingScope = {
   selectedSubjectId: number | null;
   selectedSubject: ApiSubject | null;
   setSelectedSubjectId: (subjectId: number) => void;
+  selectedClassId: number | null;
+  selectedClass: ApiClass | null;
+  setSelectedClassId: (classId: number) => void;
 };
 
 export const TeachingScopeContext = createContext<TeachingScope | null>(null);

@@ -1,15 +1,28 @@
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+import secrets
+
+
+def generate_class_code():
+    return secrets.token_hex(4).upper()
 
 class AcademicClass(models.Model):
     name = models.CharField(max_length=120)
     grade_level = models.PositiveSmallIntegerField()
     school_year = models.CharField(max_length=16)
     is_active = models.BooleanField(default=True)
+    class_code = models.CharField(max_length=16, unique=True, null=True, blank=True)
 
     class Meta:
         verbose_name_plural = "academic classes"
+
+    def save(self, *args, **kwargs):
+        if not self.class_code:
+            self.class_code = generate_class_code()
+            while AcademicClass.objects.filter(class_code=self.class_code).exclude(pk=self.pk).exists():
+                self.class_code = generate_class_code()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Grade {self.grade_level} – {self.name}"
@@ -17,7 +30,7 @@ class AcademicClass(models.Model):
 class UserProfile(models.Model):
     class Role(models.TextChoices):
         STUDENT = "student", "Student"
-        TEACHER = "teacher", "Teacher / ARAL Tutor"
+        TEACHER = "teacher", "Teacher"
         ADMIN = "admin", "Administrator"
     user = models.OneToOneField(settings.AUTH_USER_MODEL, related_name="tala_profile", on_delete=models.CASCADE)
     role = models.CharField(max_length=12, choices=Role.choices)
@@ -40,10 +53,54 @@ class UserProfile(models.Model):
     mfa_pending_secret = models.TextField(blank=True)
     mfa_recovery_codes = models.JSONField(default=list, blank=True)
 
+
+class EnrollmentRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+        CANCELLED = "cancelled", "Cancelled"
+
+    class Source(models.TextChoices):
+        STUDENT = "student", "Student class code"
+        TEACHER = "teacher", "Teacher enrollment"
+        ADMIN = "admin", "Administrator override"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="enrollment_requests", on_delete=models.CASCADE)
+    academic_class = models.ForeignKey(AcademicClass, related_name="enrollment_requests", on_delete=models.CASCADE)
+    subject = models.ForeignKey("Subject", null=True, blank=True, related_name="enrollment_requests", on_delete=models.PROTECT)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    source = models.CharField(max_length=12, choices=Source.choices)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="submitted_enrollment_requests", on_delete=models.PROTECT)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="reviewed_enrollment_requests", on_delete=models.PROTECT)
+    decision_reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["student", "academic_class", "subject"], condition=models.Q(status="pending"), name="unique_pending_subject_class_enrollment"),
+        ]
+
+
+class PrivacyAcknowledgment(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="privacy_acknowledgments", on_delete=models.PROTECT)
+    policy_version = models.CharField(max_length=40)
+    declaration_text = models.TextField()
+    accepted_at = models.DateTimeField(auto_now_add=True)
+    response_ip = models.GenericIPAddressField(null=True, blank=True)
+    response_user_agent = models.CharField(max_length=300, blank=True)
+
+    class Meta:
+        ordering = ["-accepted_at"]
+        constraints = [models.UniqueConstraint(fields=["user", "policy_version"], name="unique_user_privacy_acknowledgment")]
+
 class StudentProfile(models.Model):
     profile = models.OneToOneField(UserProfile, related_name="student_details", on_delete=models.CASCADE)
     student_number = models.CharField(max_length=40, unique=True, null=True, blank=True)
     learner_reference_number = models.CharField(max_length=40, blank=True)
+    grade_level = models.PositiveSmallIntegerField(default=11)
 
 class EmployeeProfile(models.Model):
     profile = models.OneToOneField(UserProfile, related_name="employee_details", on_delete=models.CASCADE)
@@ -93,6 +150,11 @@ class LearningResource(models.Model):
         EXERCISE = "exercise", "Exercise"
         MODULE = "module", "Module"
         VIDEO = "video", "Video"
+    class Purpose(models.TextChoices):
+        REGULAR = "regular", "Regular class material"
+        PREREQUISITE = "prerequisite", "Required before diagnostic"
+        RECOVERY = "recovery", "Recovery/remediation material"
+        ENRICHMENT = "enrichment", "Enrichment material"
     title = models.CharField(max_length=240)
     resource_type = models.CharField(max_length=16, choices=ResourceType.choices)
     difficulty = models.CharField(max_length=32, default="foundation")
@@ -102,6 +164,7 @@ class LearningResource(models.Model):
     original_filename = models.CharField(max_length=255, blank=True)
     mime_type = models.CharField(max_length=120, blank=True)
     passing_score = models.PositiveSmallIntegerField(default=70)
+    purpose = models.CharField(max_length=16, choices=Purpose.choices, default=Purpose.REGULAR)
     competencies = models.ManyToManyField(Competency, related_name="resources")
     is_approved = models.BooleanField(default=False)
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="uploaded_resources", on_delete=models.SET_NULL)
@@ -168,6 +231,8 @@ class PracticeQuestion(models.Model):
     correct_answer = models.CharField(max_length=240)
     explanation = models.TextField(blank=True)
     position = models.PositiveSmallIntegerField(default=1)
+    provenance = models.CharField(max_length=16, choices=[("extracted", "Extracted"), ("ai", "AI generated"), ("manual", "Manually authored")], default="manual")
+    source_locator = models.CharField(max_length=240, blank=True)
 
     class Meta:
         ordering = ["position", "id"]
@@ -185,6 +250,7 @@ class Assessment(models.Model):
     due_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     assigned_classes = models.ManyToManyField(AcademicClass, related_name="assessments", blank=True)
+    prerequisite_assignments = models.ManyToManyField(LearningAssignment, related_name="prerequisite_for_assessments", blank=True)
 
 class Question(models.Model):
     class QuestionType(models.TextChoices):
@@ -197,6 +263,26 @@ class Question(models.Model):
     question_type = models.CharField(max_length=8, choices=QuestionType.choices)
     options = models.JSONField(default=list)
     correct_answer = models.CharField(max_length=240)
+    source_resources = models.ManyToManyField(LearningResource, related_name="grounded_assessment_questions", blank=True)
+    generation_metadata = models.JSONField(default=dict, blank=True)
+
+
+class AssessmentEligibility(models.Model):
+    class Status(models.TextChoices):
+        RECOMMENDED = "recommended", "Recommended for teacher review"
+        ELIGIBLE = "eligible", "Eligible"
+        EXEMPTED = "exempted", "Not required"
+        COMPLETED = "completed", "Completed"
+
+    assessment = models.ForeignKey(Assessment, related_name="eligibilities", on_delete=models.CASCADE)
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="assessment_eligibilities", on_delete=models.CASCADE)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.RECOMMENDED)
+    reason = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="reviewed_assessment_eligibilities", on_delete=models.PROTECT)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["assessment", "student"], name="unique_assessment_student_eligibility")]
 
 class AssessmentAttempt(models.Model):
     assessment = models.ForeignKey(Assessment, on_delete=models.PROTECT)
@@ -590,6 +676,8 @@ class SystemConfiguration(models.Model):
     consent_expiry_days = models.PositiveSmallIntegerField(default=30)
     minor_data_retention_days = models.PositiveIntegerField(default=1825)
     privacy_contact_email = models.EmailField(blank=True)
+    privacy_notice_version = models.CharField(max_length=40, default="TALA-PRIVACY-1")
+    privacy_notice_text = models.TextField(default="I acknowledge that TALA-AI records my account details, learning activities, assessment results, and recovery progress for the school's ARAL academic support program. I understand that I may contact the school to request access or correction of my information.")
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     updated_at = models.DateTimeField(auto_now=True)
 

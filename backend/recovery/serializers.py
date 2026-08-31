@@ -5,7 +5,8 @@ from urllib.parse import urlencode
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from .models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, EmergencyContact, EmployeeProfile, GuardianContact, Intervention, LearnerCompetencyEvidence, LearningAssignment, LearningAssignmentProgress, LearningResource, Notification, NotificationPreference, PracticeQuestion, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, StudentProfile, Subject, SystemConfiguration, UserProfile
+from .models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, EmergencyContact, EmployeeProfile, EnrollmentRequest, GuardianContact, Intervention, LearnerCompetencyEvidence, LearningAssignment, LearningAssignmentProgress, LearningResource, Notification, NotificationPreference, PracticeQuestion, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, StudentProfile, Subject, SystemConfiguration, UserProfile
+from .assessment_rules import incomplete_prerequisite_assignments, remedial_student_is_eligible
 from .secure_media import create_media_token
 from .permissions import role_for
 from .assignment_rules import sync_teacher_classes
@@ -23,7 +24,8 @@ class AcademicClassSerializer(serializers.ModelSerializer):
     teacher_count = serializers.IntegerField(source="assigned_teachers.count", read_only=True)
     class Meta:
         model = AcademicClass
-        fields = ["id", "name", "grade_level", "school_year", "is_active", "label", "student_count", "teacher_count"]
+        fields = ["id", "name", "grade_level", "school_year", "is_active", "class_code", "label", "student_count", "teacher_count"]
+        read_only_fields = ["class_code"]
     def validate_grade_level(self, value):
         if value not in {11, 12}:
             raise serializers.ValidationError("TALA-AI currently supports Grade 11 and Grade 12 only.")
@@ -59,6 +61,7 @@ class UserAdminSerializer(serializers.Serializer):
     gender = serializers.CharField(required=False, allow_blank=True, max_length=32)
     phone = serializers.CharField(required=False, allow_blank=True, max_length=32)
     student_number = serializers.CharField(required=False, allow_blank=True, max_length=40)
+    grade_level = serializers.ChoiceField(choices=[11, 12], required=False)
     employee_id = serializers.CharField(required=False, allow_blank=True, max_length=40)
 
     def validate_email(self, value):
@@ -85,8 +88,6 @@ class UserAdminSerializer(serializers.Serializer):
                 raise serializers.ValidationError({"role": "You cannot change your own administrator role."})
         if not self.instance and not attrs.get("password"):
             raise serializers.ValidationError({"password": "A temporary password is required."})
-        if role == UserProfile.Role.STUDENT and not attrs.get("academic_class", getattr(getattr(self.instance, "tala_profile", None), "academic_class", None)):
-            raise serializers.ValidationError({"academic_class": "Assign the student to a class."})
         return attrs
 
     def _apply_profile(self, user, validated_data):
@@ -102,6 +103,10 @@ class UserAdminSerializer(serializers.Serializer):
             details, _ = StudentProfile.objects.get_or_create(profile=profile)
             if "student_number" in validated_data:
                 details.student_number = validated_data["student_number"] or None
+            if profile.academic_class_id:
+                details.grade_level = profile.academic_class.grade_level
+            elif "grade_level" in validated_data:
+                details.grade_level = validated_data["grade_level"]
             details.save()
         else:
             details, _ = EmployeeProfile.objects.get_or_create(profile=profile)
@@ -126,6 +131,9 @@ class UserAdminSerializer(serializers.Serializer):
         user = User.objects.create_user(username=validated_data["email"], email=validated_data["email"], password=password, first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "", is_active=validated_data.get("is_active", True))
         UserProfile.objects.create(user=user, role=validated_data["role"])
         self._apply_profile(user, {**validated_data, **related})
+        if user.tala_profile.role == UserProfile.Role.STUDENT:
+            user.tala_profile.must_change_password = True
+            user.tala_profile.save(update_fields=["must_change_password"])
         return user
 
     def update(self, user, validated_data):
@@ -158,7 +166,7 @@ class UserAdminSerializer(serializers.Serializer):
         student_details = getattr(profile, "student_details", None)
         employee_details = getattr(profile, "employee_details", None)
         academic_class = profile.academic_class
-        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else None, "section": academic_class.name if academic_class else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
+        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else student_details.grade_level if student_details else None, "section": academic_class.name if academic_class else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
 
 class CompetencySerializer(serializers.ModelSerializer):
     class Meta:
@@ -234,7 +242,7 @@ class ProfileSerializer(serializers.Serializer):
 class SystemConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemConfiguration
-        fields = ["school_year", "default_mastery_threshold", "reminder_hour", "reminder_days_before", "consent_policy_version", "consent_policy_approved", "consent_expiry_days", "minor_data_retention_days", "privacy_contact_email", "updated_at"]
+        fields = ["school_year", "default_mastery_threshold", "reminder_hour", "reminder_days_before", "consent_policy_version", "consent_policy_approved", "consent_expiry_days", "minor_data_retention_days", "privacy_contact_email", "privacy_notice_version", "privacy_notice_text", "updated_at"]
         read_only_fields = ["updated_at"]
 
     def validate_default_mastery_threshold(self, value):
@@ -264,15 +272,29 @@ class AuditEventSerializer(serializers.ModelSerializer):
         model = AuditEvent
         fields = ["id", "actor", "actor_name", "action", "object_type", "object_id", "metadata", "created_at"]
 
+
+class EnrollmentRequestSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source="student.get_full_name", read_only=True)
+    student_email = serializers.EmailField(source="student.email", read_only=True)
+    class_label = serializers.CharField(source="academic_class.__str__", read_only=True)
+    subject_name = serializers.CharField(source="subject.name", read_only=True)
+    requested_by_name = serializers.CharField(source="requested_by.get_full_name", read_only=True)
+    reviewed_by_name = serializers.CharField(source="reviewed_by.get_full_name", read_only=True)
+
+    class Meta:
+        model = EnrollmentRequest
+        fields = ["id", "student", "student_name", "student_email", "academic_class", "class_label", "subject", "subject_name", "status", "source", "requested_by", "requested_by_name", "reviewed_by", "reviewed_by_name", "decision_reason", "created_at", "reviewed_at"]
+        read_only_fields = ["status", "source", "requested_by", "reviewed_by", "decision_reason", "reviewed_at"]
+
 class PracticeQuestionPublicSerializer(serializers.ModelSerializer):
     class Meta:
         model = PracticeQuestion
-        fields = ["id", "prompt", "question_type", "options", "position"]
+        fields = ["id", "prompt", "question_type", "options", "position", "provenance", "source_locator"]
 
 class PracticeQuestionEditorSerializer(serializers.ModelSerializer):
     class Meta:
         model = PracticeQuestion
-        fields = ["id", "prompt", "question_type", "options", "correct_answer", "explanation", "position"]
+        fields = ["id", "prompt", "question_type", "options", "correct_answer", "explanation", "position", "provenance", "source_locator"]
 
 class ResourceSerializer(serializers.ModelSerializer):
     practice_questions = serializers.SerializerMethodField()
@@ -290,12 +312,12 @@ class ResourceSerializer(serializers.ModelSerializer):
         return protected_media_url(request, "resource", resource.id, path)
     class Meta:
         model = LearningResource
-        fields = ["id", "title", "resource_type", "difficulty", "content", "file_url", "external_url", "original_filename", "mime_type", "passing_score", "competencies", "practice_questions", "is_approved", "created_at"]
+        fields = ["id", "title", "resource_type", "difficulty", "purpose", "content", "file_url", "external_url", "original_filename", "mime_type", "passing_score", "competencies", "practice_questions", "is_approved", "created_at"]
         read_only_fields = ["original_filename", "mime_type", "created_at"]
 
 class LearningAssignmentSerializer(serializers.ModelSerializer):
     resource_title = serializers.CharField(source="resource.title", read_only=True)
-    resource_type = serializers.CharField(source="resource.resource_type", read_only=True)
+    resource_type = serializers.SerializerMethodField()
     resource_content = serializers.CharField(source="resource.content", read_only=True)
     original_filename = serializers.CharField(source="resource.original_filename", read_only=True)
     competency = serializers.SerializerMethodField()
@@ -311,6 +333,7 @@ class LearningAssignmentSerializer(serializers.ModelSerializer):
     quiz_passed = serializers.SerializerMethodField()
     latest_quiz_score = serializers.SerializerMethodField()
     uploaded_by_name = serializers.SerializerMethodField()
+    purpose = serializers.CharField(source="resource.purpose", read_only=True)
 
     def _progress(self, assignment):
         request = self.context.get("request")
@@ -321,6 +344,9 @@ class LearningAssignmentSerializer(serializers.ModelSerializer):
     def get_competency(self, assignment):
         competency = assignment.resource.competencies.first()
         return {"id": competency.id, "code": competency.code, "title": competency.title} if competency else None
+
+    def get_resource_type(self, assignment):
+        return LearningResource.ResourceType.VIDEO if assignment.resource.mime_type.startswith("video/") else assignment.resource.resource_type
 
     def get_file_url(self, assignment):
         if not assignment.resource.file:
@@ -382,7 +408,7 @@ class LearningAssignmentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = LearningAssignment
-        fields = ["id", "resource", "resource_title", "resource_type", "resource_content", "original_filename", "competency", "file_url", "uploaded_by_name", "assigned_classes", "class_labels", "instructions", "due_at", "is_active", "opened_at", "completed_at", "playback_position_seconds", "duration_seconds", "progress_percent", "practice_questions", "quiz_required", "quiz_passed", "latest_quiz_score", "created_at"]
+        fields = ["id", "resource", "resource_title", "resource_type", "purpose", "resource_content", "original_filename", "competency", "file_url", "uploaded_by_name", "assigned_classes", "class_labels", "instructions", "due_at", "is_active", "opened_at", "completed_at", "playback_position_seconds", "duration_seconds", "progress_percent", "practice_questions", "quiz_required", "quiz_passed", "latest_quiz_score", "created_at"]
         read_only_fields = fields
 
 class AssessmentSerializer(serializers.ModelSerializer):
@@ -392,6 +418,7 @@ class AssessmentSerializer(serializers.ModelSerializer):
     availability_reason = serializers.SerializerMethodField()
     remaining_activities = serializers.SerializerMethodField()
     consent_status = serializers.SerializerMethodField()
+    remaining_prerequisites = serializers.SerializerMethodField()
     def _remaining_activities(self, assessment):
         request = self.context.get("request")
         if not request or not request.user.is_authenticated or assessment.kind not in {Assessment.Kind.POST, Assessment.Kind.REMEDIAL} or role_for(request.user) != UserProfile.Role.STUDENT:
@@ -406,8 +433,12 @@ class AssessmentSerializer(serializers.ModelSerializer):
         ).count()
     def get_available(self, assessment):
         request = self.context.get("request")
-        if not request or not request.user.is_authenticated or assessment.kind == Assessment.Kind.PRE or role_for(request.user) != UserProfile.Role.STUDENT:
+        if not request or not request.user.is_authenticated or role_for(request.user) != UserProfile.Role.STUDENT:
             return assessment.is_active
+        if assessment.kind == Assessment.Kind.PRE:
+            return assessment.is_active and not incomplete_prerequisite_assignments(assessment, request.user).exists()
+        if assessment.kind == Assessment.Kind.REMEDIAL and not remedial_student_is_eligible(assessment, request.user):
+            return False
         consent_ready = assessment.kind != Assessment.Kind.REMEDIAL or assessment.remedial_consents.filter(student=request.user, status=RemedialExamConsent.Status.APPROVED).exists()
         return assessment.is_active and self._remaining_activities(assessment) == 0 and consent_ready
     def get_remaining_activities(self, assessment):
@@ -415,11 +446,15 @@ class AssessmentSerializer(serializers.ModelSerializer):
     def get_availability_reason(self, assessment):
         if not assessment.is_active:
             return "This assessment has not been activated by your teacher."
+        request = self.context.get("request")
+        if assessment.kind == Assessment.Kind.PRE and request and role_for(request.user) == UserProfile.Role.STUDENT:
+            remaining = incomplete_prerequisite_assignments(assessment, request.user).count()
+            if remaining:
+                return f"Complete {remaining} required learning material{'s' if remaining != 1 else ''} before taking this diagnostic."
         remaining = self._remaining_activities(assessment)
         if remaining:
             noun = "activity" if remaining == 1 else "activities"
             return f"Complete {remaining} remaining recovery {noun} to unlock this assessment."
-        request = self.context.get("request")
         if assessment.kind == Assessment.Kind.REMEDIAL and request and role_for(request.user) == UserProfile.Role.STUDENT:
             consent = assessment.remedial_consents.filter(student=request.user).first()
             if not consent:
@@ -441,6 +476,9 @@ class AssessmentSerializer(serializers.ModelSerializer):
         return consent.status if consent else "not_requested"
     def get_competency_ids(self, assessment):
         return list(assessment.questions.values_list("competency_id", flat=True).distinct())
+    def get_remaining_prerequisites(self, assessment):
+        request = self.context.get("request")
+        return incomplete_prerequisite_assignments(assessment, request.user).count() if request and request.user.is_authenticated and role_for(request.user) == UserProfile.Role.STUDENT else 0
     def validate(self, attrs):
         activating = attrs.get("is_active", getattr(self.instance, "is_active", False))
         if activating and self.instance:
@@ -450,10 +488,20 @@ class AssessmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"assigned_classes": "Assign at least one class before activation."})
             if not self.instance.questions.exists():
                 raise serializers.ValidationError({"is_active": "Add at least one question before activation."})
+        prerequisites = attrs.get("prerequisite_assignments")
+        kind = attrs.get("kind", getattr(self.instance, "kind", Assessment.Kind.PRE))
+        subject = attrs.get("subject", getattr(self.instance, "subject", None))
+        assigned_classes = attrs.get("assigned_classes")
+        if subject and assigned_classes and any(item.grade_level != subject.grade_level for item in assigned_classes):
+            raise serializers.ValidationError({"assigned_classes": f"{subject.name} is a Grade {subject.grade_level} subject. Assign only Grade {subject.grade_level} classes."})
+        if prerequisites and kind != Assessment.Kind.PRE:
+            raise serializers.ValidationError({"prerequisite_assignments": "Only diagnostic assessments can require prerequisite materials."})
+        if prerequisites and any(not assignment.resource.competencies.filter(subject=subject).exists() for assignment in prerequisites):
+            raise serializers.ValidationError({"prerequisite_assignments": "Every prerequisite must belong to the assessment subject."})
         return attrs
     class Meta:
         model = Assessment
-        fields = ["id", "title", "subject", "kind", "instructions", "due_at", "is_active", "available", "availability_reason", "remaining_activities", "consent_status", "created_by", "question_count", "competency_ids", "assigned_classes"]
+        fields = ["id", "title", "subject", "kind", "instructions", "due_at", "is_active", "available", "availability_reason", "remaining_activities", "remaining_prerequisites", "consent_status", "created_by", "question_count", "competency_ids", "assigned_classes", "prerequisite_assignments"]
         read_only_fields = ["created_by"]
 
 class QuestionPublicSerializer(serializers.ModelSerializer):
@@ -465,7 +513,8 @@ class QuestionEditorSerializer(serializers.ModelSerializer):
     competency_title = serializers.CharField(source="competency.title", read_only=True)
     class Meta:
         model = Question
-        fields = ["id", "competency", "competency_title", "prompt", "question_type", "options", "correct_answer"]
+        fields = ["id", "competency", "competency_title", "prompt", "question_type", "options", "correct_answer", "source_resources", "generation_metadata"]
+        read_only_fields = ["generation_metadata"]
 
 class AssessmentDetailSerializer(AssessmentSerializer):
     questions = serializers.SerializerMethodField()
@@ -477,6 +526,9 @@ class AssessmentDetailSerializer(AssessmentSerializer):
         target_competency_id = self.context.get("target_competency_id")
         if target_competency_id:
             questions = questions.filter(competency_id=target_competency_id)
+        target_question_ids = self.context.get("target_question_ids")
+        if target_question_ids:
+            questions = questions.filter(id__in=target_question_ids)
         return serializer(questions, many=True).data
     class Meta(AssessmentSerializer.Meta):
         fields = AssessmentSerializer.Meta.fields + ["questions"]
@@ -500,9 +552,14 @@ class LearnerCompetencyEvidenceSerializer(serializers.ModelSerializer):
 
 class AssessmentAttemptSerializer(serializers.ModelSerializer):
     competency_results = CompetencyResultSerializer(many=True, read_only=True)
+    incorrect_question_ids = serializers.SerializerMethodField()
+
+    def get_incorrect_question_ids(self, attempt):
+        return list(attempt.answers.filter(is_correct=False).values_list("question_id", flat=True))
+
     class Meta:
         model = AssessmentAttempt
-        fields = ["id", "assessment", "student", "submitted_at", "score", "competency_results"]
+        fields = ["id", "assessment", "student", "submitted_at", "score", "competency_results", "incorrect_question_ids"]
 
 class RecoveryActivitySerializer(serializers.ModelSerializer):
     resource_title = serializers.CharField(source="resource.title", read_only=True)
@@ -625,6 +682,8 @@ class ContentImportSerializer(serializers.ModelSerializer):
         if profile and profile.role == UserProfile.Role.TEACHER and subject and not profile.assigned_subjects.filter(pk=subject.pk).exists():
             raise serializers.ValidationError({"subject": "You can upload content only for subjects assigned to you."})
         assigned_class_ids = {int(item) for item in configuration.get("assigned_class_ids", [])}
+        if subject and assigned_class_ids and AcademicClass.objects.filter(id__in=assigned_class_ids).exclude(grade_level=subject.grade_level).exists():
+            raise serializers.ValidationError({"configuration": f"{subject.name} can be assigned only to Grade {subject.grade_level} classes."})
         if profile and profile.role == UserProfile.Role.TEACHER and assigned_class_ids:
             allowed_class_ids = set(profile.assigned_classes.values_list("id", flat=True))
             if not assigned_class_ids.issubset(allowed_class_ids):

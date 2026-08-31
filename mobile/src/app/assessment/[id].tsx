@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api } from '@/lib/api';
 import type { Assessment } from '@/lib/types';
 import { colors, radius, spacing } from '@/constants/tokens';
@@ -15,6 +15,7 @@ export default function AssessmentScreen() {
   const [busy, setBusy] = useState(false);
   useEffect(() => { api<{ assessment: Assessment }>(`/assessments/${id}/start/`).then(result => setAssessment(result.assessment)).catch(reason => setError(reason.message)); }, [id]);
   const submit = async () => {
+    Keyboard.dismiss();
     if (!assessment?.questions) return;
     setBusy(true); setError('');
     try { const result = await api<{ score: string }>(`/assessments/${id}/submit/`, { method: 'POST', body: JSON.stringify({ answers: assessment.questions.map(question => ({ question_id: question.id, answer: answers[question.id] })) }) }); setScore(Math.round(Number(result.score))); }

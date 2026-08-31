@@ -45,6 +45,7 @@ export function useServerTable<T>({ path, initialSort, initialDirection = 'asc',
   const [revision, setRevision] = useState(0);
   useEffect(() => { const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 250); return () => window.clearTimeout(timer); }, [query]);
   useEffect(() => { setPage(0); }, [extraParams]);
+  useEffect(() => { setOrderBy(initialSort); setDirection(initialDirection); setPage(0); }, [initialDirection, initialSort]);
   useEffect(() => {
     let active = true; setLoading(true); setError('');
     const params = new URLSearchParams(extraParams);

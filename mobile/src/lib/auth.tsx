@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { api, clearTokens, storeTokens } from './api';
 import type { AuthUser } from './types';
 
-type AuthContextValue = { user: AuthUser | null; loading: boolean; signIn: (email: string, password: string, otp?: string) => Promise<void>; signOut: () => Promise<void> };
+type AuthContextValue = { user: AuthUser | null; loading: boolean; signIn: (email: string, password: string, otp?: string) => Promise<void>; signOut: () => Promise<void>; refreshUser: () => Promise<void> };
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -18,6 +18,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await storeTokens(response.access, response.refresh); setUser(response.user);
     },
     signOut: async () => { await clearTokens(); setUser(null); },
+    refreshUser: async () => { setUser(await api<AuthUser>('/auth/me/')); },
   }), [user, loading]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

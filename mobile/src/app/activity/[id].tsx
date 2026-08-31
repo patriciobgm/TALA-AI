@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Keyboard, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api } from '@/lib/api';
 import type { Activity, Plan, PracticeFeedback } from '@/lib/types';
 import { colors, radius, spacing } from '@/constants/tokens';
@@ -39,6 +39,7 @@ export default function ActivityScreen() {
   useEffect(() => { const timer = setTimeout(() => void loadActivity(), 0); return () => clearTimeout(timer); }, [loadActivity]);
 
   const check = async () => {
+    Keyboard.dismiss();
     if (!activity || !plan) return;
     setPracticeBusy(true); setError('');
     try { const result = await api<{ passed: boolean; feedback: PracticeFeedback[] }>(`/recovery-plans/${plan.id}/activities/${activity.id}/complete/`, { method: 'POST', body: JSON.stringify({ answers }) }); setFeedback(result.feedback); setPassed(result.passed); if (result.passed) await loadActivity(); }

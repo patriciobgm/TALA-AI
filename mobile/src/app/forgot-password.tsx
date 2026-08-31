@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useRouter } from 'expo-router';
-import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, radius, spacing } from '@/constants/tokens';
 import { api } from '@/lib/api';
@@ -12,6 +12,7 @@ export default function ForgotPasswordScreen() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const submit = async () => {
+    Keyboard.dismiss();
     setBusy(true); setError('');
     try { const result = await api<{ detail: string }>('/auth/password-reset/', { method: 'POST', body: JSON.stringify({ email: email.trim() }) }, false); setMessage(result.detail); }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to request a reset link.'); }

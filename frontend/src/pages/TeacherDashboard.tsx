@@ -13,13 +13,14 @@ import { StatusChip } from '../components/StatusChip';
 import { downloadText } from '../utils/download';
 import { DataTablePagination, DataTableToolbar, SortableTableCell, useDataTable } from '../components/DataTable';
 import { useTeachingScope } from '../components/TeachingScopeContext';
+import { EnrollmentPanel } from '../components/EnrollmentPanel';
 
 export function TeacherDashboard({ onSelectLearner }: { onSelectLearner: (id: number) => void }) {
   const [status, setStatus] = useState('All');
   const [learners, setLearners] = useState<ApiLearner[] | null>(null);
   const [error, setError] = useState('');
   const scope = useTeachingScope();
-  const load = useCallback(() => { if (!scope?.selectedSubjectId) return Promise.resolve(); setLearners(null); setError(''); return api<ApiLearner[]>(`/dashboard/teacher/learners/?subject=${scope.selectedSubjectId}`).then(setLearners).catch(reason => setError(reason.message)); }, [scope?.selectedSubjectId]);
+  const load = useCallback(() => { if (!scope?.selectedSubjectId || !scope.selectedClassId) return Promise.resolve(); setLearners(null); setError(''); return api<ApiLearner[]>(`/dashboard/teacher/learners/?subject=${scope.selectedSubjectId}&class=${scope.selectedClassId}`).then(setLearners).catch(reason => setError(reason.message)); }, [scope?.selectedClassId, scope?.selectedSubjectId]);
   useEffect(() => { void load(); }, [load]);
   const statusRows = (learners ?? []).filter(learner => status === 'All' || learner.status === status);
   const table = useDataTable(statusRows, { searchText: learner => `${learner.name} ${learner.email} ${learner.section} ${learner.status}`, sortValues: { learner: learner => learner.name, progress: learner => learner.progress, gaps: learner => learner.gaps, assessment: learner => learner.assessment, status: learner => learner.status }, initialSort: 'learner' });
@@ -30,6 +31,7 @@ export function TeacherDashboard({ onSelectLearner }: { onSelectLearner: (id: nu
   return <>
     <PageHeader title="Learners" description="Monitor recovery progress and identify where teacher support is needed." action={<Button variant="outlined" disabled={!learners?.length} onClick={() => downloadText('tala-class-recovery.csv', ['Learner,Progress,Learning gaps,Last assessment,Status', ...(learners ?? []).map(l => `${l.name},${l.progress}%,${l.gaps},${l.assessment ?? ''}%,${l.status}`)].join('\n'))}>Download CSV</Button>} />
     {error && <Alert severity="error" sx={{ mb: 2 }} action={<Button onClick={load}>Retry</Button>}>{error}</Alert>}
+    <EnrollmentPanel role="teacher" subjectId={scope?.selectedSubjectId} gradeLevel={scope?.selectedSubject?.grade_level} selectedClass={scope?.selectedClass} />
     <Card sx={{ p: { xs: 2, sm: 2.5 }, mb: 3 }}>
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, 1fr)' }, gap: { xs: 2, md: 0 } }}>
         <Box sx={{ pr: { md: 3 } }}><Metric label="Learners" value={learners?.length ?? 0} detail="Assigned to this class" icon={<GroupsOutlined fontSize="small" />} /></Box>

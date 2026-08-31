@@ -41,10 +41,20 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8080/v1}
       LLM_API_KEY: ${LLM_API_KEY:-local-development}
       LLM_MODEL: ${LLM_MODEL:-llama-local}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      WHISPER_ENABLED: ${WHISPER_ENABLED:-false}
+      WHISPER_CLI_PATH: ${WHISPER_CLI_PATH:-/usr/local/bin/whisper-cli}
+      WHISPER_MODEL_PATH: ${WHISPER_MODEL_PATH:-/opt/whisper/models/ggml-base.bin}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-auto}
+      WHISPER_TIMEOUT_SECONDS: ${WHISPER_TIMEOUT_SECONDS:-1800}
+      FFMPEG_PATH: ${FFMPEG_PATH:-/usr/bin/ffmpeg}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-false}
       DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-TALA-AI <noreply@localhost>}
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles
+      - ${WHISPER_MODEL_HOST_PATH}:/opt/whisper/models/ggml-base.bin:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -64,6 +74,7 @@ services:
     environment: *backend-environment
     volumes:
       - media_data:/app/media
+      - ${WHISPER_MODEL_HOST_PATH}:/opt/whisper/models/ggml-base.bin:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -84,7 +95,7 @@ services:
       args:
         VITE_API_URL: /api
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_PORT:-3000}:80"
     volumes:
       - media_data:/srv/media:ro
       - static_data:/srv/static:ro

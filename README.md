@@ -467,7 +467,7 @@ docker compose exec backend python manage.py createsuperuser
 docker compose ps
 ```
 
-Open `http://localhost:8080` unless `WEB_PORT` was changed. The stack includes PostgreSQL, Redis, Django/Gunicorn, Celery worker, Celery beat, and Nginx. Nginx serves the SPA, proxies `/api` and `/admin`, and serves protected media only after Django authorizes a signed request.
+Open `http://localhost:3000` unless `WEB_PORT` was changed. Port 3000 avoids conflicting with the default local llama.cpp service on port 8080. The stack includes PostgreSQL, Redis, Django/Gunicorn, Celery worker, Celery beat, and Nginx. Nginx serves the SPA, proxies `/api` and `/admin`, and serves protected media only after Django authorizes a signed request.
 
 Before an internet deployment, terminate TLS at a trusted reverse proxy/load balancer, use managed secrets and backups, configure SMTP, restrict hosts/origins, set operational monitoring, and use durable private object storage for uploaded files.
 

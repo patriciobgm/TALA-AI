@@ -105,16 +105,21 @@ def rank_learning_resources(student, competency, *, exclude_resource_ids=None, l
         score__isnull=False,
     ).values("activity__resource_id").annotate(average=Avg("score"))
     prior_scores = {item["activity__resource_id"]: round(float(item["average"])) for item in attempts}
-    resources = (
+    aligned_resources = (
         LearningResource.objects.filter(is_approved=True, competencies=competency)
         .exclude(id__in=excluded)
         .prefetch_related("practice_questions")
         .distinct()
     )
+    recovery_resources = aligned_resources.filter(purpose=LearningResource.Purpose.RECOVERY)
+    resources = recovery_resources if recovery_resources.exists() else aligned_resources.exclude(purpose=LearningResource.Purpose.ENRICHMENT)
     ranked = []
     for resource in resources:
         reasons = [f"Aligned with {competency.code} · {competency.title}."]
         score = 40 + type_weights[score_band].get(resource.resource_type, 4)
+        if resource.purpose == LearningResource.Purpose.RECOVERY:
+            score += 15
+            reasons.append("The material is explicitly approved for recovery use.")
         difficulty = resource.difficulty.strip().casefold()
         score += difficulty_weights[score_band].get(difficulty, 3)
         if latest_score is not None:

@@ -11,6 +11,19 @@ from .models import Notification, NotificationDelivery, RecoveryActivity
 from .notifications import notify
 
 
+@shared_task(bind=True, autoretry_for=(OSError,), retry_backoff=True, retry_kwargs={"max_retries": 2})
+def process_video_content_import(self, content_import_id):
+    from django.contrib.auth import get_user_model
+    from .content_imports import process_content_import
+    from .models import ContentImport, UserProfile
+
+    content_import = process_content_import(ContentImport.objects.get(pk=content_import_id))
+    if content_import.status == ContentImport.Status.NEEDS_REVIEW:
+        for administrator in get_user_model().objects.filter(tala_profile__role=UserProfile.Role.ADMIN, tala_profile__is_active=True, is_active=True):
+            notify(recipient=administrator, kind=Notification.Kind.CONTENT_REVIEW, title="Content awaiting review", message=f"{content_import.uploaded_by.get_full_name() or content_import.uploaded_by.email} submitted {content_import.title}.", action_url=f"/imports/{content_import.id}", deduplication_key=f"content-import:{content_import.id}:review:{administrator.id}")
+    return content_import.status
+
+
 @shared_task
 def generate_due_reminders():
     now = timezone.now()

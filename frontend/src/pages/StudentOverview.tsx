@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, CircularProgress, Divider, LinearProgress, Stack, Typography } from '@mui/material';
-import { ArrowForward, CheckCircle, PlayArrow } from '@mui/icons-material';
+import { ArrowForward, AssignmentOutlined, CheckCircle, PlayArrow } from '@mui/icons-material';
 import { PageHeader } from '../components/PageHeader';
 import { Metric } from '../components/Metric';
 import { StatusChip } from '../components/StatusChip';
 import { api } from '../api/client';
 import type { StudentDashboardData } from '../api/types';
 import { useStudentScope } from '../components/StudentScopeContext';
+import { EnrollmentPanel } from '../components/EnrollmentPanel';
 
-export function StudentOverview({ onContinue, onAssessments }: { onContinue: () => void; onAssessments: () => void }) {
+export function StudentOverview({ onContinue, onAssessments, onMaterials }: { onContinue: () => void; onAssessments: () => void; onMaterials: () => void }) {
   const [data, setData] = useState<StudentDashboardData | null>(null);
   const [error, setError] = useState('');
   const scope = useStudentScope();
   const load = useCallback(() => { if (!scope?.selectedSubjectId) return; setData(null); setError(''); api<StudentDashboardData>(`/dashboard/student/?subject=${scope.selectedSubjectId}`).then(setData).catch(reason => setError(reason.message)); }, [scope?.selectedSubjectId]);
   useEffect(() => { load(); }, [load]);
-  if (scope && !scope.loading && !scope.selectedSubjectId) return <><PageHeader title="My Academic Recovery" /><Alert severity="info">No subject with assigned learning work is available yet.</Alert></>;
+  if (scope && !scope.loading && !scope.selectedSubjectId) return <><PageHeader title="My Academic Recovery" /><EnrollmentPanel role="student" /><Alert severity="info">No subject with assigned learning work is available yet.</Alert></>;
   if (!data && !error) return <Box sx={{ minHeight: 360, display: 'grid', placeItems: 'center' }}><CircularProgress size={28} /></Box>;
   if (error) return <><PageHeader title="My academic recovery" /><Alert severity="error" action={<Button onClick={load}>Retry</Button>}>{error}</Alert></>;
 
@@ -28,6 +29,15 @@ export function StudentOverview({ onContinue, onAssessments }: { onContinue: () 
 
   return <>
     <PageHeader title="My academic recovery" description="Continue your plan and track your competency progress." />
+    {data!.academic_class?.class_code && <Alert severity="info" sx={{ mb: 3 }}><strong>{data!.academic_class.subject_name}</strong> enrollment code <Box component="span" sx={{ fontFamily: 'monospace', fontWeight: 800, ml: .5 }}>{data!.academic_class.class_code}</Box>.</Alert>}
+    {data!.pending_diagnostic && <Card sx={{ mb: 3, p: { xs: 2.5, sm: 3 }, border: '2px solid', borderColor: 'primary.main', bgcolor: '#f5faff' }}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} gap={2.5} alignItems={{ sm: 'center' }}>
+        <Box sx={{ width: 48, height: 48, borderRadius: 2, bgcolor: 'primary.main', color: 'primary.contrastText', display: 'grid', placeItems: 'center', flexShrink: 0 }}><AssignmentOutlined /></Box>
+        <Box sx={{ flex: 1 }}><Typography variant="overline" color="primary.main" fontWeight={800}>{data!.pending_diagnostic.remaining_prerequisites ? 'Learning materials required first' : 'Required diagnostic'}</Typography><Typography variant="h2">{data!.pending_diagnostic.remaining_prerequisites ? `${data!.pending_diagnostic.remaining_prerequisites} material${data!.pending_diagnostic.remaining_prerequisites === 1 ? '' : 's'} before ${data!.pending_diagnostic.title}` : data!.pending_diagnostic.title}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{data!.pending_diagnostic.remaining_prerequisites ? data!.pending_diagnostic.prerequisite_titles.join(' · ') : `Answer ${data!.pending_diagnostic.question_count} questions so TALA can identify which competencies need support and prepare the correct recovery plan.`}</Typography></Box>
+        <Button variant="contained" size="large" endIcon={<ArrowForward />} onClick={data!.pending_diagnostic.remaining_prerequisites ? onMaterials : onAssessments}>{data!.pending_diagnostic.remaining_prerequisites ? 'Complete materials' : 'Take diagnostic'}</Button>
+      </Stack>
+    </Card>}
+    <EnrollmentPanel role="student" compact />
     {plan ? <Card sx={{ mb: 3, overflow: 'hidden' }}>
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(0, 1.5fr) minmax(320px, .7fr)' } }}>
         <Box sx={{ p: { xs: 2.5, sm: 3 } }}><Typography variant="overline" color="text.secondary" fontWeight={700}>Current recovery plan</Typography><Typography variant="h2" sx={{ mt: .5 }}>{plan.competency_title}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .75 }}>Complete the approved activities in order, then take the mastery check.</Typography><Box sx={{ mt: 3, display: 'flex', alignItems: 'center', gap: 1.5 }}><LinearProgress variant="determinate" value={progress} sx={{ flex: 1, maxWidth: 440, height: 8, borderRadius: 3, bgcolor: '#e6ebef' }} /><Typography variant="body2" fontWeight={700}>{progress}%</Typography></Box><Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} sx={{ mt: 3 }}><Button variant="contained" startIcon={<PlayArrow />} onClick={onContinue}>Continue recovery plan</Button></Stack></Box>

@@ -17,8 +17,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .account_security import consume_recovery_code, decrypt_secret, encrypt_secret, generate_recovery_codes, generate_totp_secret, hash_recovery_codes, provisioning_uri, verify_totp
-from .models import AuditEvent
-from .models import UserProfile
+from .models import AuditEvent, PrivacyAcknowledgment, SystemConfiguration, UserProfile
 from .secure_media import validate_media_token
 from .serializers import ProfileSerializer
 
@@ -42,6 +41,10 @@ class TalaTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 def user_payload(user):
     profile = getattr(user, "tala_profile", None)
+    privacy_required = False
+    if profile and profile.role == UserProfile.Role.STUDENT:
+        configuration = SystemConfiguration.load()
+        privacy_required = not PrivacyAcknowledgment.objects.filter(user=user, policy_version=configuration.privacy_notice_version).exists()
     return {
         "id": user.id,
         "username": user.username,
@@ -52,6 +55,7 @@ def user_payload(user):
         "class_name": str(profile.academic_class) if profile and profile.academic_class else None,
         "must_change_password": bool(profile and profile.must_change_password),
         "mfa_enabled": bool(profile and profile.mfa_enabled),
+        "privacy_acknowledgment_required": privacy_required,
     }
 
 class TalaTokenObtainPairView(TokenObtainPairView):
@@ -82,12 +86,47 @@ class CurrentUserView(APIView):
         return Response(user_payload(request.user))
 
 
-def send_reset_email(user, request=None):
+def send_reset_email(user, request=None, onboarding=False):
     uid = urlsafe_base64_encode(force_bytes(user.pk))
     token = default_token_generator.make_token(user)
     frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
     reset_url = f"{frontend_url}/reset-password?uid={uid}&token={token}"
-    send_mail("Reset your TALA-AI password", f"Use this single-use link to reset your password:\n\n{reset_url}\n\nIf you did not request this, ignore this message.", settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
+    subject = "Welcome to TALA-AI — set your password" if onboarding else "Reset your TALA-AI password"
+    introduction = "An ARAL learning-support account has been created for you." if onboarding else "A password reset was requested for your account."
+    send_mail(subject, f"{introduction}\n\nUse this single-use link to choose your password:\n\n{reset_url}\n\nIf you did not expect this message, contact the school.", settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def privacy_acknowledgment(request):
+    if request.user.tala_profile.role != UserProfile.Role.STUDENT:
+        return Response({"detail": "Privacy acknowledgment is required only for student accounts."}, status=status.HTTP_403_FORBIDDEN)
+    configuration = SystemConfiguration.load()
+    existing = PrivacyAcknowledgment.objects.filter(user=request.user, policy_version=configuration.privacy_notice_version).first()
+    data = {
+        "policy_version": configuration.privacy_notice_version,
+        "declaration_text": configuration.privacy_notice_text,
+        "privacy_contact_email": configuration.privacy_contact_email,
+        "acknowledged": bool(existing),
+        "accepted_at": existing.accepted_at if existing else None,
+    }
+    if request.method == "GET":
+        return Response(data)
+    if request.user.tala_profile.must_change_password:
+        return Response({"detail": "Choose a new password before acknowledging the privacy declaration."}, status=status.HTTP_409_CONFLICT)
+    if request.data.get("accepted") is not True:
+        return Response({"accepted": "Confirm that you have read and acknowledge the declaration."}, status=status.HTTP_400_BAD_REQUEST)
+    acknowledgment, _ = PrivacyAcknowledgment.objects.get_or_create(
+        user=request.user,
+        policy_version=configuration.privacy_notice_version,
+        defaults={
+            "declaration_text": configuration.privacy_notice_text,
+            "response_ip": request.META.get("HTTP_X_FORWARDED_FOR", "").split(",")[0].strip() or request.META.get("REMOTE_ADDR"),
+            "response_user_agent": request.META.get("HTTP_USER_AGENT", "")[:300],
+        },
+    )
+    AuditEvent.objects.get_or_create(actor=request.user, action="privacy.acknowledged", object_type="PrivacyAcknowledgment", object_id=str(acknowledgment.pk), defaults={"metadata": {"policy_version": configuration.privacy_notice_version}})
+    return Response({**data, "acknowledged": True, "accepted_at": acknowledgment.accepted_at})
 
 
 @api_view(["POST"])
