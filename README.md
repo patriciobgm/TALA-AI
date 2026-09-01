@@ -88,7 +88,7 @@ After the one-time installation and migration steps, run each service in its own
 ### Terminal 1 — local AI service
 
 ```bash
-llama-server --model "$HOME/Models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" --alias llama-local --host 127.0.0.1 --port 8080 --ctx-size 4096 --n-gpu-layers 99
+llama-server --model "/Volumes/Mac Data/Models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" --alias llama-local --host 127.0.0.1 --port 8080 --ctx-size 4096 --n-gpu-layers 99
 ```
 
 Confirm that it is ready:
@@ -303,12 +303,12 @@ Publishing never automatically makes an assessment available to students. Admini
 
 The backend now supports a configurable local `whisper.cpp` pipeline. It uses FFmpeg to extract 16 kHz mono WAV audio, runs `whisper-cli`, retains the transcript for review, and detects explicitly spoken, answer-keyed questions. It does not invent quiz questions when the transcript contains only lesson narration.
 
-Install the Homebrew packages and download an English base model:
+Install the Homebrew packages. The current development setup keeps the Whisper model on the external SSD:
 
 ```bash
 brew install whisper-cpp ffmpeg
-mkdir -p "$HOME/Models"
-curl --location --output "$HOME/Models/ggml-base.en.bin" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+mkdir -p "/Volumes/Mac Data/Models"
+curl --location --output "/Volumes/Mac Data/Models/ggml-base.bin" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
 command -v whisper-cli
 command -v ffmpeg
 ```
@@ -318,8 +318,8 @@ Configure `backend/.env` using absolute paths:
 ```dotenv
 WHISPER_ENABLED=true
 WHISPER_CLI_PATH=/opt/homebrew/bin/whisper-cli
-WHISPER_MODEL_PATH=/Users/YOUR_USERNAME/Models/ggml-base.en.bin
-WHISPER_LANGUAGE=en
+WHISPER_MODEL_PATH="/Volumes/Mac Data/Models/ggml-base.bin"
+WHISPER_LANGUAGE=auto
 WHISPER_TIMEOUT_SECONDS=1800
 FFMPEG_PATH=/opt/homebrew/bin/ffmpeg
 ```
