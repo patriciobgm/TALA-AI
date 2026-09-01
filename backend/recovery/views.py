@@ -21,15 +21,16 @@ from rest_framework.response import Response
 
 from .content_imports import ContentImportError, process_content_import, publish_content_import, sync_published_practice_questions
 from .learning_intelligence import rank_learning_resources, record_evidence
-from .models import AIMessage, AIMessageEvaluation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GuardianContact, Intervention, LearnerCompetencyEvidence, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyRequest, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SystemConfiguration, UsabilityEvaluation, UserProfile
-from .assessment_rules import incomplete_prerequisite_assignments, remedial_student_is_eligible
+from .companion_intelligence import record_question_outcome, update_learning_outcome
+from .models import AIHelpRequest, AIMessage, AIMessageEvaluation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GuardianContact, Intervention, LearnerCompetencyEvidence, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyRequest, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SystemConfiguration, UsabilityEvaluation, UserProfile
+from .assessment_rules import incomplete_prerequisite_assignments, matching_diagnostic_assignments, remedial_student_is_eligible
 from .llm.base import LLMRequest, LLMUnavailable
 from .llm.factory import get_llm_provider
 from .notifications import assigned_teachers_for, notify
 from .permissions import IsAdmin, IsStudent, IsTeacher, IsTeacherOrAdmin, role_for
 from .secure_media import validate_media_token
 from .serializers import AcademicClassSerializer, ActivityAttemptSerializer, AssessmentAttemptSerializer, AssessmentDetailSerializer, AssessmentSerializer, AuditEventSerializer, CompetencySerializer, ContentImportSerializer, DeviceRegistrationSerializer, EnrollmentRequestSerializer, InterventionSerializer, LearnerCompetencyEvidenceSerializer, LearningAssignmentSerializer, NotificationPreferenceSerializer, NotificationSerializer, QuestionEditorSerializer, ResourceSerializer, RecoveryActivitySerializer, RecoveryPlanSerializer, SubjectSerializer, SystemConfigurationSerializer, UserAdminSerializer
-from .services import calculate_competency_results, create_recovery_plan
+from .services import calculate_competency_results, create_recovery_plan, sync_recovery_activity_completion
 from .resource_index import index_learning_resource
 from .research_evidence import build_evidence_package, freeze_evidence_package
 from .assignment_rules import sync_teacher_classes
@@ -353,7 +354,7 @@ class UserAdminViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdmin]
     http_method_names = ["get", "post", "patch", "head", "options"]
     def get_queryset(self):
-        queryset = get_user_model().objects.filter(tala_profile__isnull=False).exclude(pk=self.request.user.pk).select_related("tala_profile__academic_class")
+        queryset = get_user_model().objects.filter(tala_profile__isnull=False).exclude(pk=self.request.user.pk).select_related("tala_profile__academic_class", "tala_profile__student_details", "tala_profile__employee_details")
         if not self.request.user.is_superuser:
             queryset = queryset.exclude(tala_profile__role=UserProfile.Role.ADMIN)
         role_filter = self.request.query_params.get("role")
@@ -471,7 +472,8 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
                 queryset = queryset.filter(resource__competencies__subject_id=subject_id)
             return queryset.distinct().order_by("-created_at", "-id")
         if role == UserProfile.Role.TEACHER:
-            return queryset.filter(assigned_by=self.request.user)
+            profile = self.request.user.tala_profile
+            return queryset.filter(resource__competencies__subject__in=profile.assigned_subjects.all(), assigned_classes__in=profile.assigned_classes.all()).distinct().order_by("-created_at", "-id")
         return queryset.order_by("-created_at", "-id")
 
     def _update_progress(self, request, assignment, *, complete=False):
@@ -494,6 +496,8 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
             update_fields.append("completed_at")
         if update_fields:
             progress.save(update_fields=update_fields)
+        if progress.completed_at:
+            sync_recovery_activity_completion(request.user, assignment, progress.completed_at)
         assignment = self.get_queryset().get(pk=assignment.pk)
         return Response(self.get_serializer(assignment).data)
 
@@ -550,6 +554,8 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
         score = Decimal(correct * 100) / Decimal(len(questions))
         passed = score >= assignment.resource.passing_score
         LearningAssignmentQuizAttempt.objects.create(assignment=assignment, student=request.user, answers=answer_map, score=score, passed=passed)
+        for question in questions:
+            record_question_outcome(student=request.user, question=question, correct=answer_map[question.id].strip().casefold() == question.correct_answer.strip().casefold())
         if passed:
             progress, _ = LearningAssignmentProgress.objects.get_or_create(assignment=assignment, student=request.user)
             progress.opened_at = progress.opened_at or timezone.now()
@@ -557,6 +563,8 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
             if watched:
                 progress.completed_at = progress.completed_at or timezone.now()
             progress.save(update_fields=["opened_at", "completed_at"] if watched else ["opened_at"])
+            if progress.completed_at:
+                sync_recovery_activity_completion(request.user, assignment, progress.completed_at)
         assignment = self.get_queryset().get(pk=assignment.pk)
         return Response({"score": round(float(score), 2), "passed": passed, "required_score": assignment.resource.passing_score, "assignment": self.get_serializer(assignment).data}, status=status.HTTP_201_CREATED)
 
@@ -600,8 +608,12 @@ class AssessmentViewSet(viewsets.ModelViewSet):
             serializer.validated_data.pop("assigned_classes", None)
             assessment = serializer.save(created_by=self.request.user, is_active=False)
             assessment.assigned_classes.set(assigned_classes)
+            if assessment.kind == Assessment.Kind.PRE and "prerequisite_assignments" not in self.request.data:
+                assessment.prerequisite_assignments.set(matching_diagnostic_assignments(subject, assigned_classes))
             return
-        serializer.save(created_by=self.request.user, is_active=False)
+        assessment = serializer.save(created_by=self.request.user, is_active=False)
+        if assessment.kind == Assessment.Kind.PRE and "prerequisite_assignments" not in self.request.data:
+            assessment.prerequisite_assignments.set(matching_diagnostic_assignments(subject, assessment.assigned_classes.all()))
 
     def perform_update(self, serializer):
         was_active = serializer.instance.is_active
@@ -707,7 +719,8 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         type_guidance = {
             Question.QuestionType.MULTIPLE_CHOICE: "Use exactly four plausible options and make correct_answer exactly match one option.",
             Question.QuestionType.TRUE_FALSE: 'Use options ["True", "False"] and make correct_answer exactly "True" or "False".',
-            Question.QuestionType.SHORT_ANSWER: "Use an empty options list and a concise, unambiguous correct_answer.",
+            Question.QuestionType.SHORT_ANSWER: "Create identification items. Use an empty options list and a concise, unambiguous correct_answer that can be scored case-insensitively.",
+            Question.QuestionType.ESSAY: "Create short-essay prompts that require explanation or reasoning. Use an empty options list, provide a teacher-facing reference answer, and set character_limit from 300 to 1200. Essays require teacher scoring.",
         }[question_type]
         prompt = f"""Create exactly {count} {Question.QuestionType(question_type).label.lower()} assessment questions for the teaching workspace {assessment.subject.name} (Grade {assessment.subject.grade_level}).
 Distribute the questions across only these selected competencies:
@@ -715,7 +728,7 @@ Distribute the questions across only these selected competencies:
 
 {type_guidance}
 Return JSON only with this shape:
-{{"questions":[{{"competency_code":"code above","prompt":"...","question_type":"{question_type}","options":["..."],"correct_answer":"..."}}]}}
+{{"questions":[{{"competency_code":"code above","prompt":"...","question_type":"{question_type}","options":["..."],"correct_answer":"...","character_limit":500}}]}}
 Keep wording age-appropriate, avoid trick questions, and do not duplicate a question."""
         if source_context:
             prompt += f"\n\nGround every question in these approved learning materials. Do not copy their learning-quiz questions verbatim:\n{source_context[:24000]}"
@@ -750,6 +763,10 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
             options = row.get("options", [])
             prompt_text = str(row.get("prompt", "")).strip()
             correct_answer = str(row.get("correct_answer", "")).strip()
+            try:
+                character_limit = int(row.get("character_limit", 500 if question_type == Question.QuestionType.ESSAY else 240))
+            except (TypeError, ValueError):
+                return Response({"detail": "The AI response contained an invalid character limit."}, status=status.HTTP_502_BAD_GATEWAY)
             if not competency or not prompt_text or not correct_answer or not isinstance(options, list):
                 return Response({"detail": "The AI response contained an incomplete or out-of-scope question."}, status=status.HTTP_502_BAD_GATEWAY)
             if re.sub(r"\W+", " ", prompt_text.casefold()).strip() in source_quiz_prompts:
@@ -757,11 +774,11 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
             options = [str(option).strip() for option in options if str(option).strip()]
             if question_type == Question.QuestionType.TRUE_FALSE:
                 options = ["True", "False"]
-            if question_type == Question.QuestionType.SHORT_ANSWER:
+            if question_type in {Question.QuestionType.SHORT_ANSWER, Question.QuestionType.ESSAY}:
                 options = []
             elif len(options) < 2 or correct_answer not in options:
                 return Response({"detail": "The AI response contained invalid answer choices."}, status=status.HTTP_502_BAD_GATEWAY)
-            serializer = QuestionEditorSerializer(data={"competency": competency.id, "prompt": prompt_text, "question_type": question_type, "options": options, "correct_answer": correct_answer})
+            serializer = QuestionEditorSerializer(data={"competency": competency.id, "prompt": prompt_text, "question_type": question_type, "options": options, "correct_answer": correct_answer, "character_limit": character_limit})
             serializer.is_valid(raise_exception=True)
             validated.append(serializer)
         with transaction.atomic():
@@ -782,6 +799,92 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
 
     def _remedial_consent_ready(self, assessment, user):
         return assessment.kind != Assessment.Kind.REMEDIAL or assessment.remedial_consents.filter(student=user, status=RemedialExamConsent.Status.APPROVED).exists()
+
+    def _finalize_attempt(self, attempt):
+        assessment = attempt.assessment
+        student = attempt.student
+        results = calculate_competency_results(attempt)
+        evidence_type = LearnerCompetencyEvidence.EvidenceType.DIAGNOSTIC if assessment.kind == Assessment.Kind.PRE else LearnerCompetencyEvidence.EvidenceType.MASTERY
+        for competency_result in results:
+            record_evidence(student=student, competency=competency_result.competency, evidence_type=evidence_type, source_type="assessment_attempt", source_id=attempt.id, score=competency_result.score, summary=f"{assessment.get_kind_display()} result: {competency_result.get_status_display()}.", details={"assessment_id": assessment.id, "status": competency_result.status}, occurred_at=attempt.submitted_at)
+            update_learning_outcome(student, competency_result.competency, competency_result.score)
+        for answer in attempt.answers.select_related("question__competency").prefetch_related("question__misconceptions"):
+            if answer.is_correct is not None:
+                record_question_outcome(student=student, question=answer.question, correct=answer.is_correct)
+        if assessment.kind == Assessment.Kind.PRE:
+            developing_policy = SystemConfiguration.load().developing_support_policy
+            for result in results:
+                if result.status == CompetencyResult.Status.REMEDIATION:
+                    create_recovery_plan(student, result)
+                elif result.status == CompetencyResult.Status.DEVELOPING and developing_policy in {"guided", "full"}:
+                    create_recovery_plan(student, result, support_level=developing_policy)
+        else:
+            for result in results:
+                if result.status == CompetencyResult.Status.MASTERED:
+                    completed_plans = RecoveryPlan.objects.filter(student=student, competency=result.competency, status="active")
+                    RecoveryActivity.objects.filter(plan__in=completed_plans, resource__isnull=True, completed_at__isnull=True).update(completed_at=timezone.now())
+                    completed_plans.update(status="completed")
+            if assessment.kind == Assessment.Kind.POST and any(result.status != CompetencyResult.Status.MASTERED for result in results):
+                remedial_assessments = Assessment.objects.filter(kind=Assessment.Kind.REMEDIAL, subject=assessment.subject, assigned_classes=student.tala_profile.academic_class, is_active=True).distinct()
+                for remedial in remedial_assessments:
+                    AssessmentEligibility.objects.get_or_create(assessment=remedial, student=student, defaults={"status": AssessmentEligibility.Status.RECOMMENDED, "reason": f"Mastery check {assessment.title} still shows an unmet competency."})
+            if assessment.kind == Assessment.Kind.REMEDIAL:
+                AssessmentEligibility.objects.filter(assessment=assessment, student=student).update(status=AssessmentEligibility.Status.COMPLETED)
+        notify(recipient=student, kind=Notification.Kind.ASSESSMENT_RESULT, title="Assessment scored", message=f"Your score for {assessment.title} is {round(float(attempt.score))}%.", action_url="/assessments", deduplication_key=f"assessment-attempt:{attempt.id}:student:scored")
+        for teacher in assigned_teachers_for(student):
+            notify(recipient=teacher, kind=Notification.Kind.ASSESSMENT_RESULT, title="Learner assessment scored", message=f"{student.get_full_name() or student.username} scored {round(float(attempt.score))}% on {assessment.title}.", action_url=f"/learners/{student.id}", deduplication_key=f"assessment-attempt:{attempt.id}:teacher:{teacher.id}:scored")
+
+    @action(detail=True, methods=["get", "post"], url_path=r"essay-reviews(?:/(?P<attempt_id>[^/.]+))?")
+    def essay_reviews(self, request, pk=None, attempt_id=None):
+        assessment = self.get_object()
+        pending = AssessmentAttempt.objects.filter(assessment=assessment, grading_status=AssessmentAttempt.GradingStatus.PENDING_REVIEW).select_related("student").prefetch_related("answers__question__competency")
+        if request.method == "GET":
+            return Response([{
+                "attempt_id": attempt.id,
+                "student": attempt.student_id,
+                "student_name": attempt.student.get_full_name() or attempt.student.username,
+                "submitted_at": attempt.submitted_at,
+                "answers": [{
+                    "answer_id": answer.id,
+                    "question_id": answer.question_id,
+                    "prompt": answer.question.prompt,
+                    "response": answer.answer,
+                    "reference_answer": answer.question.correct_answer,
+                    "character_limit": answer.question.character_limit,
+                    "competency": answer.question.competency.title,
+                } for answer in attempt.answers.all() if answer.question.question_type == Question.QuestionType.ESSAY],
+            } for attempt in pending])
+        attempt = pending.filter(pk=attempt_id).first()
+        if not attempt:
+            return Response({"detail": "This essay submission is no longer awaiting review."}, status=status.HTTP_404_NOT_FOUND)
+        grades = request.data.get("grades")
+        if not isinstance(grades, list):
+            return Response({"grades": "Provide a score for every short-essay response."}, status=status.HTTP_400_BAD_REQUEST)
+        essay_answers = {answer.id: answer for answer in attempt.answers.select_related("question__competency").filter(question__question_type=Question.QuestionType.ESSAY)}
+        try:
+            grade_map = {int(item["answer_id"]): (Decimal(str(item["score"])), str(item.get("feedback", "")).strip()) for item in grades}
+        except (KeyError, TypeError, ValueError):
+            return Response({"grades": "Each grade needs a valid answer and score."}, status=status.HTTP_400_BAD_REQUEST)
+        if set(grade_map) != set(essay_answers) or any(score < 0 or score > 100 for score, _ in grade_map.values()):
+            return Response({"grades": "Score every essay from 0 to 100 exactly once."}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            for answer_id, (score_value, feedback) in grade_map.items():
+                answer = essay_answers[answer_id]
+                answer.score = score_value
+                answer.is_correct = score_value >= answer.question.competency.mastery_threshold
+                answer.feedback = feedback
+                answer.save(update_fields=["score", "is_correct", "feedback"])
+            scores = list(attempt.answers.values_list("score", flat=True))
+            if any(value is None for value in scores):
+                return Response({"detail": "Every response must be scored before finalizing this attempt."}, status=status.HTTP_409_CONFLICT)
+            attempt.score = sum(scores, Decimal("0")) / Decimal(len(scores)) if scores else Decimal("0")
+            attempt.grading_status = AssessmentAttempt.GradingStatus.TEACHER_SCORED
+            attempt.reviewed_by = request.user
+            attempt.reviewed_at = timezone.now()
+            attempt.save(update_fields=["score", "grading_status", "reviewed_by", "reviewed_at"])
+            self._finalize_attempt(attempt)
+            AuditEvent.objects.create(actor=request.user, action="assessment.essay_scored", object_type="AssessmentAttempt", object_id=str(attempt.id), metadata={"assessment_id": assessment.id, "student_id": attempt.student_id})
+        return Response(AssessmentAttemptSerializer(attempt).data)
 
     @action(detail=True, methods=["post"], url_path="request-consent")
     def request_consent(self, request, pk=None):
@@ -903,11 +1006,16 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
                 question_queryset = question_queryset.filter(id__in=requested_question_ids)
         questions = {q.id: q for q in question_queryset}
         try:
-            answer_map = {int(item.get("question_id")): str(item.get("answer", "")) for item in supplied if item.get("question_id")}
+            answer_map = {int(item.get("question_id")): str(item.get("answer", "")).strip() for item in supplied if item.get("question_id")}
         except (TypeError, ValueError):
             return Response({"answers": "Question identifiers must be valid integers."}, status=status.HTTP_400_BAD_REQUEST)
         if set(answer_map) != set(questions):
             return Response({"answers": "Every assessment question must be answered exactly once."}, status=status.HTTP_400_BAD_REQUEST)
+        if any(not answer for answer in answer_map.values()):
+            return Response({"answers": "Every assessment question requires an answer."}, status=status.HTTP_400_BAD_REQUEST)
+        oversized = [question.id for question in questions.values() if question.question_type == Question.QuestionType.ESSAY and len(answer_map[question.id]) > question.character_limit]
+        if oversized:
+            return Response({"answers": f"A short-essay response exceeds its character limit (question {oversized[0]})."}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             attempt = AssessmentAttempt.objects.filter(assessment=assessment, student=request.user, submitted_at__isnull=True).first()
             if attempt is None:
@@ -915,34 +1023,23 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
             attempt.answers.all().delete()
             for question_id, answer in answer_map.items():
                 question = questions[question_id]
-                StudentAnswer.objects.create(attempt=attempt, question=question, answer=answer, is_correct=answer.strip().casefold() == question.correct_answer.strip().casefold())
-            correct = attempt.answers.filter(is_correct=True).count()
-            attempt.score = Decimal(correct * 100) / Decimal(len(questions)) if questions else Decimal("0")
+                if question.question_type == Question.QuestionType.ESSAY:
+                    StudentAnswer.objects.create(attempt=attempt, question=question, answer=answer)
+                else:
+                    is_correct = answer.casefold() == question.correct_answer.strip().casefold()
+                    StudentAnswer.objects.create(attempt=attempt, question=question, answer=answer, is_correct=is_correct, score=Decimal("100") if is_correct else Decimal("0"))
+            awaiting_review = attempt.answers.filter(question__question_type=Question.QuestionType.ESSAY).exists()
+            objective_scores = list(attempt.answers.exclude(score__isnull=True).values_list("score", flat=True))
+            attempt.score = None if awaiting_review else (sum(objective_scores, Decimal("0")) / Decimal(len(objective_scores)) if objective_scores else Decimal("0"))
             attempt.submitted_at = timezone.now()
-            attempt.save(update_fields=["score", "submitted_at"])
-            results = calculate_competency_results(attempt)
-            evidence_type = LearnerCompetencyEvidence.EvidenceType.DIAGNOSTIC if assessment.kind == Assessment.Kind.PRE else LearnerCompetencyEvidence.EvidenceType.MASTERY
-            for competency_result in results:
-                record_evidence(student=request.user, competency=competency_result.competency, evidence_type=evidence_type, source_type="assessment_attempt", source_id=attempt.id, score=competency_result.score, summary=f"{assessment.get_kind_display()} result: {competency_result.get_status_display()}.", details={"assessment_id": assessment.id, "status": competency_result.status}, occurred_at=attempt.submitted_at)
-            if assessment.kind == Assessment.Kind.PRE:
-                for result in results:
-                    if result.status == CompetencyResult.Status.REMEDIATION:
-                        create_recovery_plan(request.user, result)
+            attempt.grading_status = AssessmentAttempt.GradingStatus.PENDING_REVIEW if awaiting_review else AssessmentAttempt.GradingStatus.AUTO_SCORED
+            attempt.save(update_fields=["score", "submitted_at", "grading_status"])
+            if awaiting_review:
+                notify(recipient=request.user, kind=Notification.Kind.ASSESSMENT_RESULT, title="Assessment submitted", message=f"Your short-essay responses for {assessment.title} are awaiting teacher review. Your result and any recovery plan will be available after grading.", action_url="/assessments", deduplication_key=f"assessment-attempt:{attempt.id}:student:pending")
+                for teacher in assigned_teachers_for(request.user):
+                    notify(recipient=teacher, kind=Notification.Kind.ASSESSMENT_RESULT, title="Short essays need review", message=f"{request.user.get_full_name() or request.user.username} submitted {assessment.title}. Review the short-essay responses to finalize the result.", action_url="/assessments", deduplication_key=f"assessment-attempt:{attempt.id}:teacher:{teacher.id}:pending")
             else:
-                for result in results:
-                    if result.status == CompetencyResult.Status.MASTERED:
-                        completed_plans = RecoveryPlan.objects.filter(student=request.user, competency=result.competency, status="active")
-                        RecoveryActivity.objects.filter(plan__in=completed_plans, resource__isnull=True, completed_at__isnull=True).update(completed_at=timezone.now())
-                        completed_plans.update(status="completed")
-                if assessment.kind == Assessment.Kind.POST and any(result.status != CompetencyResult.Status.MASTERED for result in results):
-                    remedial_assessments = Assessment.objects.filter(kind=Assessment.Kind.REMEDIAL, subject=assessment.subject, assigned_classes=request.user.tala_profile.academic_class, is_active=True).distinct()
-                    for remedial in remedial_assessments:
-                        AssessmentEligibility.objects.get_or_create(assessment=remedial, student=request.user, defaults={"status": AssessmentEligibility.Status.RECOMMENDED, "reason": f"Mastery check {assessment.title} still shows an unmet competency."})
-                if assessment.kind == Assessment.Kind.REMEDIAL:
-                    AssessmentEligibility.objects.filter(assessment=assessment, student=request.user).update(status=AssessmentEligibility.Status.COMPLETED)
-            notify(recipient=request.user, kind=Notification.Kind.ASSESSMENT_RESULT, title="Assessment submitted", message=f"Your score for {assessment.title} is {round(float(attempt.score))}%.", action_url="/assessments", deduplication_key=f"assessment-attempt:{attempt.id}:student")
-            for teacher in assigned_teachers_for(request.user):
-                notify(recipient=teacher, kind=Notification.Kind.ASSESSMENT_RESULT, title="Learner assessment submitted", message=f"{request.user.get_full_name() or request.user.username} scored {round(float(attempt.score))}% on {assessment.title}.", action_url=f"/learners/{request.user.id}", deduplication_key=f"assessment-attempt:{attempt.id}:teacher:{teacher.id}")
+                self._finalize_attempt(attempt)
         return Response(AssessmentAttemptSerializer(attempt).data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["get"], url_path="my-attempts")
@@ -1049,6 +1146,7 @@ class RecoveryPlanViewSet(viewsets.ReadOnlyModelViewSet):
                 is_correct = normalized[str(question.id)].casefold() == question.correct_answer.strip().casefold()
                 correct += int(is_correct)
                 feedback.append({"question_id": question.id, "student_answer": normalized[str(question.id)], "correct_answer": question.correct_answer, "is_correct": is_correct, "explanation": question.explanation})
+                record_question_outcome(student=request.user, question=question, correct=is_correct)
             score = Decimal(correct * 100) / Decimal(len(questions))
         else:
             score = Decimal("100")
@@ -1398,7 +1496,11 @@ def teacher_learner_detail(request, student_id):
         eligibility = assessment.eligibilities.filter(student=student).first()
         remedial_rows.append({"id": assessment.id, "title": assessment.title, "eligible": remaining == 0, "eligibility_status": eligibility.status if eligibility else "not_recommended", "eligibility_reason": eligibility.reason if eligibility else "", "remaining_activities": remaining, "consent_status": consent.status if consent else "not_requested", "guardian_name": consent.guardian_name if consent else "", "requested_at": consent.requested_at if consent else None, "evidence_attached": bool(consent and consent.evidence_file)})
     guardians = list(student.tala_profile.guardian_contacts.values("id", "name", "relationship", "phone", "email"))
-    return Response({"student": {"id": student.id, "name": student.get_full_name() or student.username, "email": student.email, "section": str(student.tala_profile.academic_class) if student.tala_profile.academic_class else "Unassigned"}, "plans": RecoveryPlanSerializer(plans, many=True).data, "attempts": AssessmentAttemptSerializer(attempts, many=True).data, "evidence": LearnerCompetencyEvidenceSerializer(evidence, many=True).data, "interventions": InterventionSerializer(interventions, many=True).data, "guardians": guardians, "remedial_exams": remedial_rows, "recommendations": _recommendation_rows(student, plans.filter(status="active"))})
+    help_requests = AIHelpRequest.objects.filter(student=student).select_related("competency")
+    if subject_ids is not None:
+        help_requests = help_requests.filter(competency__subject_id__in=subject_ids)
+    help_requests = help_requests.order_by("-created_at")[:10]
+    return Response({"student": {"id": student.id, "name": student.get_full_name() or student.username, "email": student.email, "section": str(student.tala_profile.academic_class) if student.tala_profile.academic_class else "Unassigned"}, "plans": RecoveryPlanSerializer(plans, many=True).data, "attempts": AssessmentAttemptSerializer(attempts, many=True).data, "evidence": LearnerCompetencyEvidenceSerializer(evidence, many=True).data, "interventions": InterventionSerializer(interventions, many=True).data, "help_requests": [{"id": item.id, "competency": item.competency.title if item.competency else "General support", "summary": item.summary, "status": item.status, "created_at": item.created_at} for item in help_requests], "guardians": guardians, "remedial_exams": remedial_rows, "recommendations": _recommendation_rows(student, plans.filter(status="active"))})
 
 @api_view(["GET"])
 @permission_classes([IsAdmin])

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Box, Button, Card, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, FormControlLabel, InputLabel, MenuItem, Radio, RadioGroup, Select, Stack, Tab, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Tabs, TextField, Typography } from '@mui/material';
-import { ArchiveOutlined, CloudUploadOutlined, DeleteOutline, DescriptionOutlined, EditOutlined, PlayCircleOutline, RateReviewOutlined, VisibilityOutlined } from '@mui/icons-material';
+import { Add, ArchiveOutlined, CloudUploadOutlined, DeleteOutline, DescriptionOutlined, EditOutlined, PlayCircleOutline, RateReviewOutlined, VisibilityOutlined } from '@mui/icons-material';
 import { api } from '../api/client';
 import type { ApiClass, ApiCompetency, ApiSubject, ContentImport, ExtractedQuestion } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
@@ -8,6 +8,7 @@ import { StatusChip } from '../components/StatusChip';
 import { DataTablePagination, DataTableToolbar, SortableTableCell, useDataTable } from '../components/DataTable';
 import { useTeachingScope } from '../components/TeachingScopeContext';
 import { MultiSelectField } from '../components/MultiSelectField';
+import { useUrlView } from '../utils/useUrlView';
 
 const unwrap = <T,>(value: T[] | { results?: T[] }) => Array.isArray(value) ? value : value.results ?? [];
 const statusLabel: Record<ContentImport['status'], string> = { uploaded: 'Uploaded', processing: 'Processing', needs_review: 'Needs review', published: 'Published', failed: 'Failed', rejected: 'Rejected' };
@@ -18,6 +19,7 @@ const governanceDescriptions = {
   issues: 'Failed or rejected submissions that require correction or documented follow-up.',
   archived: 'Historical content retained for audit purposes and no longer available to learners.',
 };
+const governanceGroups = ['review', 'published', 'issues', 'archived'] as const;
 
 export function ContentImportsPage({ admin = false, initialImportId = null }: { admin?: boolean; initialImportId?: number | null }) {
   const scope = useTeachingScope();
@@ -32,7 +34,7 @@ export function ContentImportsPage({ admin = false, initialImportId = null }: { 
   const [reviewTab, setReviewTab] = useState<'questions' | 'original'>('questions');
   const [originalPreviewUrl, setOriginalPreviewUrl] = useState('');
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [governanceGroup, setGovernanceGroup] = useState<'review' | 'published' | 'issues' | 'archived'>('review');
+  const [governanceGroup, setGovernanceGroup] = useUrlView(governanceGroups, 'review');
   const [kind, setKind] = useState<ContentImport['kind'] | ''>('');
   const [title, setTitle] = useState('');
   const [subject, setSubject] = useState<number | ''>('');
@@ -104,11 +106,12 @@ export function ContentImportsPage({ admin = false, initialImportId = null }: { 
     if (!focusedImportId || !imports) return;
     const item = imports.find(row => row.id === focusedImportId);
     if (!item) { setError('The requested content submission is unavailable or you do not have access to it.'); setFocusedImportId(null); return; }
-    if (admin) setGovernanceGroup(item.archived_at ? 'archived' : item.status === 'published' ? 'published' : ['failed', 'rejected'].includes(item.status) ? 'issues' : 'review');
+    const nextGroup = item.archived_at ? 'archived' : item.status === 'published' ? 'published' : ['failed', 'rejected'].includes(item.status) ? 'issues' : 'review';
+    if (admin) setGovernanceGroup(nextGroup);
     selectImport(item);
     setFocusedImportId(null);
-    window.history.replaceState({}, '', '/imports');
-  }, [admin, focusedImportId, imports]);
+    window.history.replaceState({}, '', admin && nextGroup !== 'review' ? `/imports?view=${nextGroup}` : '/imports');
+  }, [admin, focusedImportId, imports, setGovernanceGroup]);
   const retryProcessing = async () => {
     if (!selected) return;
     setBusy(true); setError('');
@@ -131,6 +134,17 @@ export function ContentImportsPage({ admin = false, initialImportId = null }: { 
     finally { setBusy(false); }
   };
   const updateQuestion = (index: number, changes: Partial<ExtractedQuestion>) => setQuestions(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...changes } : item));
+  const updateChoice = (questionIndex: number, choiceIndex: number, nextValue: string) => setQuestions(current => current.map((question, index) => {
+    if (index !== questionIndex) return question;
+    const previousValue = question.options[choiceIndex];
+    return { ...question, options: question.options.map((choice, position) => position === choiceIndex ? nextValue : choice), correct_answer: question.correct_answer === previousValue ? nextValue : question.correct_answer };
+  }));
+  const addChoice = (questionIndex: number) => setQuestions(current => current.map((question, index) => index === questionIndex ? { ...question, options: [...question.options, ''] } : question));
+  const removeChoice = (questionIndex: number, choiceIndex: number) => setQuestions(current => current.map((question, index) => {
+    if (index !== questionIndex) return question;
+    const removed = question.options[choiceIndex];
+    return { ...question, options: question.options.filter((_, position) => position !== choiceIndex), correct_answer: question.correct_answer === removed ? '' : question.correct_answer };
+  }));
   const removeQuestion = (index: number) => setQuestions(current => current.filter((_, itemIndex) => itemIndex !== index));
   const saveReview = async () => {
     if (!selected) return;
@@ -184,7 +198,6 @@ export function ContentImportsPage({ admin = false, initialImportId = null }: { 
     <PageHeader title={admin ? 'Content Governance' : 'Learning Materials'} description={admin ? 'Review teacher submissions and control what becomes available to learners.' : 'Upload modules, documents, videos, and formal exam files from one workspace.'} action={admin ? undefined : <Button variant="contained" startIcon={<CloudUploadOutlined />} onClick={() => setOpen(true)}>Upload Material</Button>} />
     {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
     {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
-    <Alert severity="info" sx={{ mb: 3 }}>{admin ? 'Teachers submit content; administrators verify its accuracy, rights, and competency mapping before publication.' : 'Your upload remains unavailable to learners until an administrator reviews and publishes it.'}</Alert>
       <Box>
       {admin && <Card sx={{ mb: 2 }}>
         <Box sx={{ px: 2.5, pt: 2.25 }}><Typography variant="h2">Governance queues</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{governanceDescriptions[governanceGroup]}</Typography></Box>
@@ -196,8 +209,7 @@ export function ContentImportsPage({ admin = false, initialImportId = null }: { 
         {selected.error_message && <Alert severity={selected.status === 'failed' ? 'error' : 'warning'} sx={{ mb: 2 }} action={selected.status === 'failed' ? <Button color="inherit" size="small" disabled={busy} onClick={() => void retryProcessing()}>{busy ? 'Retrying…' : 'Retry Processing'}</Button> : undefined}>{selected.error_message}</Alert>}
         {reviewTab === 'questions' && questions.length > 0 && <Stack gap={2}>
           <Box><Typography variant="h3">{selected.kind === 'exam' ? 'Extracted Assessment Questions' : 'Learning Quiz Review'}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Review, correct, or remove each question before learners receive this material.</Typography></Box>
-          {selected.extracted_payload.quiz_generation_status === 'ai_generated' && <Alert severity="warning">These questions were proposed by AI from the video transcript ({selected.extracted_payload.quiz_provider} · {selected.extracted_payload.quiz_model}). A teacher and administrator must verify every answer before publication.</Alert>}
-          <Alert severity="info">{selected.status === 'published' ? 'Removed questions take effect after you save the published quiz revision. Existing completed attempts remain part of the learner record.' : 'Question removals are saved when you save edits or approve the material.'}</Alert>
+          <Box sx={{ px: 1.5, py: 1.25, borderRadius: 1, bgcolor: 'action.hover', borderLeft: '3px solid', borderColor: selected.extracted_payload.quiz_generation_status === 'ai_generated' ? 'warning.main' : 'info.main' }}><Typography variant="body2" fontWeight={700}>{selected.extracted_payload.quiz_generation_status === 'ai_generated' ? 'AI draft from the video transcript · Verify each question and answer before publication.' : 'Review each question and answer before publication.'}</Typography><Typography variant="caption" color="text.secondary">{selected.status === 'published' ? 'Saving applies removals to future attempts; completed learner attempts are retained.' : 'Edits and removals are applied when you save or approve this material.'}</Typography></Box>
           {questions.map((question, index) => {
             const editable = ['needs_review', 'published'].includes(selected.status);
             return <Card key={`${question.source_number}-${index}`} variant="outlined" sx={{ p: { xs: 2, sm: 2.5 }, boxShadow: 'none' }}>
@@ -208,8 +220,10 @@ export function ContentImportsPage({ admin = false, initialImportId = null }: { 
               <Stack gap={2}>
                 <TextField label="Question prompt" multiline minRows={2} value={question.prompt} disabled={!editable} onChange={event => updateQuestion(index, { prompt: event.target.value })} />
                 <TextField select label="Competency" value={question.competency_id ?? ''} disabled={!editable} onChange={event => updateQuestion(index, { competency_id: Number(event.target.value), competency_code: competencies.find(item => item.id === Number(event.target.value))?.code ?? '' })}>{competencies.filter(item => item.subject === selected.subject).map(item => <MenuItem key={item.id} value={item.id}>{item.code} · {item.title}</MenuItem>)}</TextField>
-                {question.question_type !== 'short' && <Box><Typography variant="body2" fontWeight={700} sx={{ mb: 1 }}>Answer choices</Typography><Stack gap={1}>{question.options.map((option, optionIndex) => <TextField key={optionIndex} size="small" label={`Choice ${String.fromCharCode(65 + optionIndex)}`} value={option} disabled={!editable} onChange={event => updateQuestion(index, { options: question.options.map((value, valueIndex) => valueIndex === optionIndex ? event.target.value : value) })} />)}</Stack></Box>}
-                {question.question_type !== 'short' ? <TextField select label="Correct answer" value={question.options.includes(question.correct_answer) ? question.correct_answer : ''} disabled={!editable} onChange={event => updateQuestion(index, { correct_answer: event.target.value })} helperText={!question.options.includes(question.correct_answer) ? 'Choose the correct answer from the available choices.' : 'Learners must select this exact answer.'}>{question.options.filter(Boolean).map(option => <MenuItem key={option} value={option}>{option}</MenuItem>)}</TextField> : <TextField label="Correct answer" value={question.correct_answer} disabled={!editable} onChange={event => updateQuestion(index, { correct_answer: event.target.value })} />}
+                {selected.kind === 'exam' && <TextField select label="Question type" value={question.question_type} disabled={!editable} onChange={event => { const type = event.target.value as typeof question.question_type; updateQuestion(index, { question_type: type, options: type === 'tf' ? ['True', 'False'] : type === 'mcq' ? question.options : [], character_limit: type === 'essay' ? question.character_limit ?? 500 : 240 }); }}><MenuItem value="mcq">Multiple choice</MenuItem><MenuItem value="tf">True or false</MenuItem><MenuItem value="short">Identification</MenuItem><MenuItem value="essay">Short essay</MenuItem></TextField>}
+                {['mcq', 'tf'].includes(question.question_type) && <Box><Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 1 }}><Typography variant="body2" fontWeight={700}>Answer choices</Typography>{question.question_type === 'mcq' && editable && <Button size="small" startIcon={<Add />} onClick={() => addChoice(index)}>Add choice</Button>}</Stack><Stack gap={1}>{question.options.map((option, optionIndex) => <Stack key={optionIndex} direction="row" alignItems="center" gap={1}><TextField fullWidth size="small" label={`Choice ${String.fromCharCode(65 + optionIndex)}`} value={option} disabled={!editable || question.question_type === 'tf'} onChange={event => updateChoice(index, optionIndex, event.target.value)} />{question.question_type === 'mcq' && editable && <Button color="error" size="small" startIcon={<DeleteOutline />} onClick={() => removeChoice(index, optionIndex)} disabled={question.options.length <= 2} aria-label={`Remove choice ${String.fromCharCode(65 + optionIndex)}`}>Remove</Button>}</Stack>)}</Stack>{question.question_type === 'mcq' && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>Add or remove choices as needed. Multiple-choice questions must retain at least two choices.</Typography>}</Box>}
+                {['mcq', 'tf'].includes(question.question_type) ? <TextField select label="Correct answer" value={question.options.includes(question.correct_answer) ? question.correct_answer : ''} disabled={!editable} onChange={event => updateQuestion(index, { correct_answer: event.target.value })} helperText={!question.options.includes(question.correct_answer) ? 'Choose the correct answer from the available choices.' : 'Learners must select this exact answer.'}>{question.options.filter(Boolean).map(option => <MenuItem key={option} value={option}>{option}</MenuItem>)}</TextField> : <TextField label={question.question_type === 'essay' ? 'Reference answer' : 'Correct answer'} value={question.correct_answer} multiline={question.question_type === 'essay'} minRows={question.question_type === 'essay' ? 3 : undefined} disabled={!editable} onChange={event => updateQuestion(index, { correct_answer: event.target.value })} helperText={question.question_type === 'essay' ? 'Teacher-facing guide for manual scoring; learners do not see this while answering.' : 'Enter the concise expected identification answer.'} />}
+                {question.question_type === 'essay' && <TextField label="Learner response limit" type="number" value={question.character_limit ?? 500} disabled={!editable} onChange={event => updateQuestion(index, { character_limit: Number(event.target.value) })} inputProps={{ min: 100, max: 2000 }} helperText="Allowed range: 100–2,000 characters. Short essays require teacher review before results and recovery plans are finalized." />}
               </Stack>
             </Card>;
           })}

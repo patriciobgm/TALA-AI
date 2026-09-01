@@ -94,6 +94,7 @@ CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", DEBUG)
 CELERY_TASK_EAGER_PROPAGATES = DEBUG
 CELERY_BEAT_SCHEDULE = {
     "generate-due-reminders": {"task": "recovery.tasks.generate_due_reminders", "schedule": crontab(minute="0", hour="7,16")},
+    "generate-inactivity-reminders": {"task": "recovery.tasks.generate_inactivity_reminders", "schedule": crontab(minute="30", hour="7")},
     "dispatch-pending-notifications": {"task": "recovery.tasks.dispatch_pending_notifications", "schedule": 60.0},
 }
 EXPO_PUSH_URL = os.getenv("EXPO_PUSH_URL", "https://exp.host/--/api/v2/push/send")

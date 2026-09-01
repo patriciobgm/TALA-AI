@@ -4,7 +4,7 @@ import { api } from '../api/client';
 import { PageHeader } from '../components/PageHeader';
 
 type Contact = { name: string; relationship: string; phone: string; email: string; is_primary: boolean };
-type Profile = { id: number; name: string; email: string; role: string; class_name: string; assignments: string[]; mfa_enabled: boolean; preferred_name: string; avatar_url: string; date_of_birth: string | null; gender: string; phone: string; address_line: string; city_municipality: string; province: string; postal_code: string; identifier: string; emergency_contacts: Contact[] };
+type Profile = { id: number; name: string; email: string; role: string; class_name: string; cluster: 'academics' | 'tech_pro' | ''; assignments: string[]; mfa_enabled: boolean; preferred_name: string; avatar_url: string; date_of_birth: string | null; gender: string; phone: string; address_line: string; city_municipality: string; province: string; postal_code: string; identifier: string; emergency_contacts: Contact[] };
 type MfaSetup = { secret: string; provisioning_uri: string };
 type PrivacyRequest = { id: number; request_type: string; status: string; details: string; resolution: string; created_at: string };
 

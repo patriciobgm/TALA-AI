@@ -97,10 +97,15 @@ class PrivacyAcknowledgment(models.Model):
         constraints = [models.UniqueConstraint(fields=["user", "policy_version"], name="unique_user_privacy_acknowledgment")]
 
 class StudentProfile(models.Model):
+    class Cluster(models.TextChoices):
+        ACADEMICS = "academics", "Academics"
+        TECH_PRO = "tech_pro", "Tech Pro"
+
     profile = models.OneToOneField(UserProfile, related_name="student_details", on_delete=models.CASCADE)
     student_number = models.CharField(max_length=40, unique=True, null=True, blank=True)
     learner_reference_number = models.CharField(max_length=40, blank=True)
     grade_level = models.PositiveSmallIntegerField(default=11)
+    cluster = models.CharField(max_length=16, choices=Cluster.choices, default=Cluster.ACADEMICS)
 
 class EmployeeProfile(models.Model):
     profile = models.OneToOneField(UserProfile, related_name="employee_details", on_delete=models.CASCADE)
@@ -233,6 +238,7 @@ class PracticeQuestion(models.Model):
     position = models.PositiveSmallIntegerField(default=1)
     provenance = models.CharField(max_length=16, choices=[("extracted", "Extracted"), ("ai", "AI generated"), ("manual", "Manually authored")], default="manual")
     source_locator = models.CharField(max_length=240, blank=True)
+    misconceptions = models.ManyToManyField("Misconception", related_name="practice_questions", blank=True)
 
     class Meta:
         ordering = ["position", "id"]
@@ -256,15 +262,18 @@ class Question(models.Model):
     class QuestionType(models.TextChoices):
         MULTIPLE_CHOICE = "mcq", "Multiple choice"
         TRUE_FALSE = "tf", "True/False"
-        SHORT_ANSWER = "short", "Short answer"
+        SHORT_ANSWER = "short", "Identification"
+        ESSAY = "essay", "Short essay"
     assessment = models.ForeignKey(Assessment, related_name="questions", on_delete=models.CASCADE)
     competency = models.ForeignKey(Competency, on_delete=models.PROTECT)
     prompt = models.TextField()
     question_type = models.CharField(max_length=8, choices=QuestionType.choices)
     options = models.JSONField(default=list)
-    correct_answer = models.CharField(max_length=240)
+    correct_answer = models.TextField()
+    character_limit = models.PositiveSmallIntegerField(default=500)
     source_resources = models.ManyToManyField(LearningResource, related_name="grounded_assessment_questions", blank=True)
     generation_metadata = models.JSONField(default=dict, blank=True)
+    misconceptions = models.ManyToManyField("Misconception", related_name="assessment_questions", blank=True)
 
 
 class AssessmentEligibility(models.Model):
@@ -285,10 +294,18 @@ class AssessmentEligibility(models.Model):
         constraints = [models.UniqueConstraint(fields=["assessment", "student"], name="unique_assessment_student_eligibility")]
 
 class AssessmentAttempt(models.Model):
+    class GradingStatus(models.TextChoices):
+        AUTO_SCORED = "auto_scored", "Automatically scored"
+        PENDING_REVIEW = "pending_review", "Awaiting teacher review"
+        TEACHER_SCORED = "teacher_scored", "Teacher scored"
+
     assessment = models.ForeignKey(Assessment, on_delete=models.PROTECT)
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     submitted_at = models.DateTimeField(null=True, blank=True)
     score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    grading_status = models.CharField(max_length=16, choices=GradingStatus.choices, default=GradingStatus.AUTO_SCORED)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="reviewed_assessment_attempts", on_delete=models.PROTECT)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
 
 class RemedialExamConsent(models.Model):
     class Status(models.TextChoices):
@@ -333,8 +350,10 @@ class RemedialExamConsent(models.Model):
 class StudentAnswer(models.Model):
     attempt = models.ForeignKey(AssessmentAttempt, related_name="answers", on_delete=models.CASCADE)
     question = models.ForeignKey(Question, on_delete=models.PROTECT)
-    answer = models.CharField(max_length=240)
-    is_correct = models.BooleanField(default=False)
+    answer = models.TextField()
+    is_correct = models.BooleanField(null=True, blank=True, default=None)
+    score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    feedback = models.TextField(blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["attempt", "question"], name="unique_attempt_question_answer")]
@@ -353,8 +372,15 @@ class RecoveryPlan(models.Model):
     student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="recovery_plans", on_delete=models.CASCADE)
     competency = models.ForeignKey(Competency, on_delete=models.PROTECT)
     baseline_score = models.DecimalField(max_digits=5, decimal_places=2)
+    trigger_status = models.CharField(max_length=16, blank=True)
+    trigger_attempt = models.ForeignKey(AssessmentAttempt, null=True, blank=True, related_name="generated_recovery_plans", on_delete=models.SET_NULL)
     status = models.CharField(max_length=16, default="active")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["student", "competency"], condition=models.Q(status="active"), name="unique_active_student_competency_plan"),
+        ]
 
 class RecoveryActivity(models.Model):
     plan = models.ForeignKey(RecoveryPlan, related_name="activities", on_delete=models.CASCADE)
@@ -417,6 +443,42 @@ class AIConversation(models.Model):
             models.UniqueConstraint(fields=["student", "learning_assignment"], condition=models.Q(learning_assignment__isnull=False), name="unique_student_assignment_ai_conversation"),
         ]
 
+
+class AICompanionSession(models.Model):
+    class Stage(models.TextChoices):
+        ORIENT = "orient", "Set the learning goal"
+        EXPLAIN = "explain", "Understand the concept"
+        EXAMPLE = "example", "Review an example"
+        REASONING = "reasoning", "Explain your reasoning"
+        PRACTICE = "practice", "Try independent practice"
+        REFLECT = "reflect", "Reflect and summarize"
+        COMPLETED = "completed", "Completed"
+
+    conversation = models.ForeignKey(AIConversation, related_name="companion_sessions", on_delete=models.CASCADE)
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="companion_sessions", on_delete=models.CASCADE)
+    goal = models.CharField(max_length=240, blank=True)
+    stage = models.CharField(max_length=16, choices=Stage.choices, default=Stage.ORIENT)
+    summary = models.TextField(blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+
+class AIHelpRequest(models.Model):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        ACKNOWLEDGED = "acknowledged", "Acknowledged"
+        RESOLVED = "resolved", "Resolved"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="ai_help_requests", on_delete=models.CASCADE)
+    plan = models.ForeignKey(RecoveryPlan, null=True, blank=True, related_name="help_requests", on_delete=models.SET_NULL)
+    session = models.ForeignKey(AICompanionSession, null=True, blank=True, related_name="help_requests", on_delete=models.SET_NULL)
+    competency = models.ForeignKey(Competency, null=True, blank=True, related_name="ai_help_requests", on_delete=models.SET_NULL)
+    summary = models.TextField()
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
 class AIMessage(models.Model):
     class Role(models.TextChoices):
         USER = "user", "User"
@@ -456,6 +518,89 @@ class AIMessageEvaluation(models.Model):
     incorrect_answer_leakage = models.BooleanField(default=False)
     notes = models.TextField(blank=True)
     evaluated_at = models.DateTimeField(auto_now=True)
+
+
+class Misconception(models.Model):
+    competency = models.ForeignKey(Competency, related_name="misconceptions", on_delete=models.CASCADE)
+    code = models.CharField(max_length=40)
+    title = models.CharField(max_length=180)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="created_misconceptions", on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["competency__code", "title"]
+        constraints = [models.UniqueConstraint(fields=["competency", "code"], name="unique_competency_misconception_code")]
+
+
+class LearnerMisconception(models.Model):
+    class Status(models.TextChoices):
+        DETECTED = "detected", "Detected"
+        CONFIRMED = "confirmed", "Teacher confirmed"
+        DISMISSED = "dismissed", "Dismissed"
+        RESOLVED = "resolved", "Resolved"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="misconception_signals", on_delete=models.CASCADE)
+    misconception = models.ForeignKey(Misconception, related_name="learner_signals", on_delete=models.CASCADE)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.DETECTED)
+    confidence = models.PositiveSmallIntegerField(default=50)
+    occurrence_count = models.PositiveIntegerField(default=1)
+    source_question_ids = models.JSONField(default=list, blank=True)
+    teacher_note = models.TextField(blank=True)
+    first_observed_at = models.DateTimeField(auto_now_add=True)
+    last_observed_at = models.DateTimeField(auto_now=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="reviewed_misconception_signals", on_delete=models.SET_NULL)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-last_observed_at"]
+        constraints = [models.UniqueConstraint(fields=["student", "misconception"], name="unique_student_misconception_signal")]
+
+
+class LearningGoal(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        ACHIEVED = "achieved", "Achieved"
+        REVISED = "revised", "Revised"
+        ARCHIVED = "archived", "Archived"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="learning_goals", on_delete=models.CASCADE)
+    competency = models.ForeignKey(Competency, related_name="learning_goals", on_delete=models.CASCADE)
+    plan = models.ForeignKey(RecoveryPlan, null=True, blank=True, related_name="learning_goals", on_delete=models.SET_NULL)
+    title = models.CharField(max_length=240)
+    target_score = models.PositiveSmallIntegerField(default=75)
+    target_date = models.DateField(null=True, blank=True)
+    progress_percent = models.PositiveSmallIntegerField(default=0)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="created_learning_goals", on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["status", "target_date", "-updated_at"]
+        constraints = [models.UniqueConstraint(fields=["student", "competency"], condition=models.Q(status="active"), name="unique_active_student_competency_goal")]
+
+
+class AdaptiveLearningState(models.Model):
+    class Level(models.TextChoices):
+        FOUNDATION = "foundation", "Foundation"
+        GUIDED = "guided", "Guided"
+        STANDARD = "standard", "Standard"
+        CHALLENGE = "challenge", "Challenge"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="adaptive_learning_states", on_delete=models.CASCADE)
+    competency = models.ForeignKey(Competency, related_name="adaptive_learning_states", on_delete=models.CASCADE)
+    level = models.CharField(max_length=16, choices=Level.choices, default=Level.GUIDED)
+    success_streak = models.PositiveSmallIntegerField(default=0)
+    miss_streak = models.PositiveSmallIntegerField(default=0)
+    reason = models.CharField(max_length=240, blank=True)
+    last_signal_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["student", "competency"], name="unique_student_competency_adaptive_state")]
 
 
 class UsabilityEvaluation(models.Model):
@@ -669,8 +814,11 @@ class SystemConfiguration(models.Model):
 
     school_year = models.CharField(max_length=16, default="2026-2027")
     default_mastery_threshold = models.PositiveSmallIntegerField(default=75)
+    developing_support_policy = models.CharField(max_length=16, choices=[("monitor", "Monitor only"), ("guided", "Guided support plan"), ("full", "Full recovery plan")], default="guided")
     reminder_hour = models.PositiveSmallIntegerField(default=7)
     reminder_days_before = models.PositiveSmallIntegerField(default=2)
+    inactivity_days = models.PositiveSmallIntegerField(default=3)
+    inactivity_reminder_cooldown_days = models.PositiveSmallIntegerField(default=3)
     consent_policy_version = models.CharField(max_length=40, default="DRAFT-1")
     consent_policy_approved = models.BooleanField(default=False)
     consent_expiry_days = models.PositiveSmallIntegerField(default=30)

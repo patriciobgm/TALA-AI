@@ -8,6 +8,26 @@ from .notifications import notify
 
 DEVELOPING_THRESHOLD = 50
 
+
+def sync_recovery_activity_completion(student, assignment, completed_at):
+    """Reuse material completion recorded after the diagnostic that created a plan."""
+    if not completed_at:
+        return 0
+    activities = RecoveryActivity.objects.filter(
+        plan__student=student,
+        plan__status="active",
+        resource=assignment.resource,
+        completed_at__isnull=True,
+    ).select_related("plan__trigger_attempt")
+    completed_ids = []
+    for activity in activities:
+        trigger_time = activity.plan.trigger_attempt.submitted_at if activity.plan.trigger_attempt_id else activity.plan.created_at
+        if trigger_time and completed_at >= trigger_time:
+            completed_ids.append(activity.id)
+    if completed_ids:
+        RecoveryActivity.objects.filter(id__in=completed_ids).update(completed_at=completed_at)
+    return len(completed_ids)
+
 def classify_mastery(score: float, mastery_threshold: int = 75) -> str:
     """Deterministic classification used by scoring and plan generation."""
     if score >= mastery_threshold:
@@ -20,10 +40,15 @@ def classify_mastery(score: float, mastery_threshold: int = 75) -> str:
 def calculate_competency_results(attempt):
     grouped = defaultdict(list)
     for answer in attempt.answers.select_related("question__competency"):
-        grouped[answer.question.competency].append(answer.is_correct)
+        answer_score = answer.score
+        if answer_score is None and answer.is_correct is not None:
+            answer_score = 100 if answer.is_correct else 0
+        if answer_score is None:
+            raise ValueError("Every answer must be scored before competency results are calculated.")
+        grouped[answer.question.competency].append(float(answer_score))
     results = []
     for competency, answers in grouped.items():
-        score = round(sum(answers) / len(answers) * 100, 2)
+        score = round(sum(answers) / len(answers), 2)
         result, _ = CompetencyResult.objects.update_or_create(
             attempt=attempt, competency=competency,
             defaults={"score": score, "status": classify_mastery(score, competency.mastery_threshold)},
@@ -32,7 +57,7 @@ def calculate_competency_results(attempt):
     return results
 
 @transaction.atomic
-def create_recovery_plan(student, result):
+def create_recovery_plan(student, result, *, support_level="full"):
     latest_result = (
         CompetencyResult.objects.filter(
             attempt__student=student,
@@ -76,10 +101,11 @@ def create_recovery_plan(student, result):
 
     plan, created = RecoveryPlan.objects.get_or_create(
         student=student, competency=result.competency, status="active",
-        defaults={"baseline_score": result.score},
+        defaults={"baseline_score": result.score, "trigger_status": result.status, "trigger_attempt": result.attempt},
     )
     if created:
-        recommendations = rank_learning_resources(student, result.competency, limit=3)
+        recommendation_limit = 2 if support_level == "guided" else 3
+        recommendations = rank_learning_resources(student, result.competency, limit=recommendation_limit)
         for position, recommendation in enumerate(recommendations, start=1):
             resource = recommendation["resource"]
             RecoveryActivity.objects.create(

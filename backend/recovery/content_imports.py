@@ -186,13 +186,15 @@ def parse_exam_text(text, default_competency=None, answer_key=None):
         competency = default_competency
         if competency_code:
             competency = Competency.objects.filter(subject=default_competency.subject if default_competency else None, code__iexact=competency_code).first()
-        question_type = Question.QuestionType.MULTIPLE_CHOICE if len(options) > 2 else Question.QuestionType.TRUE_FALSE if len(options) == 2 and {item["text"].casefold() for item in options} == {"true", "false"} else Question.QuestionType.SHORT_ANSWER
+        essay_prompt = bool(re.match(r"^(?:explain|discuss|describe|analyze|justify|compare|evaluate|how|why)\b", prompt, re.IGNORECASE))
+        question_type = Question.QuestionType.MULTIPLE_CHOICE if len(options) > 2 else Question.QuestionType.TRUE_FALSE if len(options) == 2 and {item["text"].casefold() for item in options} == {"true", "false"} else Question.QuestionType.ESSAY if not options and (essay_prompt or len(answer) > 120) else Question.QuestionType.SHORT_ANSWER
         questions.append({
             "source_number": int(match.group(1)),
             "prompt": prompt,
             "question_type": question_type,
             "options": [item["text"] for item in options],
             "correct_answer": answer,
+            "character_limit": max(300, min(2000, len(answer) * 4)) if question_type == Question.QuestionType.ESSAY else 240,
             "competency_id": competency.id if competency else None,
             "competency_code": competency.code if competency else competency_code,
             "confidence": "high" if competency and (options or question_type == Question.QuestionType.SHORT_ANSWER) else "needs_review",
@@ -347,7 +349,13 @@ def _validate_exam_payload(content_import):
             raise ContentImportError(f"Question {position} is incomplete.")
         if question_type in {Question.QuestionType.MULTIPLE_CHOICE, Question.QuestionType.TRUE_FALSE} and correct_answer not in options:
             raise ContentImportError(f"Question {position}'s correct answer must match one of its choices.")
-        validated.append((competency, prompt, question_type, options, correct_answer))
+        try:
+            character_limit = int(item.get("character_limit", 500 if question_type == Question.QuestionType.ESSAY else 240))
+        except (TypeError, ValueError):
+            raise ContentImportError(f"Question {position}'s character limit is invalid.")
+        if question_type == Question.QuestionType.ESSAY and not 100 <= character_limit <= 2000:
+            raise ContentImportError(f"Question {position}'s short-essay limit must be between 100 and 2,000 characters.")
+        validated.append((competency, prompt, question_type, options, correct_answer, character_limit))
     return validated
 
 
@@ -394,8 +402,8 @@ def publish_content_import(content_import, reviewer):
         )
         class_ids = content_import.configuration.get("assigned_class_ids", [])
         assessment.assigned_classes.set(class_ids)
-        for competency, prompt, question_type, options, answer in questions:
-            Question.objects.create(assessment=assessment, competency=competency, prompt=prompt, question_type=question_type, options=options, correct_answer=answer)
+        for competency, prompt, question_type, options, answer, character_limit in questions:
+            Question.objects.create(assessment=assessment, competency=competency, prompt=prompt, question_type=question_type, options=options, correct_answer=answer, character_limit=character_limit)
         content_import.published_assessment = assessment
     else:
         resource_type = LearningResource.ResourceType.VIDEO if content_import.kind == ContentImport.Kind.VIDEO else LearningResource.ResourceType.MODULE

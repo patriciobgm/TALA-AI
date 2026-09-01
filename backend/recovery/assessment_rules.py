@@ -1,4 +1,21 @@
-from .models import Assessment, AssessmentEligibility, LearningAssignmentProgress
+from .models import Assessment, AssessmentEligibility, LearningAssignment, LearningAssignmentProgress, LearningResource
+
+
+def matching_diagnostic_assignments(subject, assigned_classes):
+    """Return active, approved class materials that should precede a diagnostic."""
+    class_ids = [item.pk for item in assigned_classes]
+    if not class_ids:
+        return LearningAssignment.objects.none()
+    return (
+        LearningAssignment.objects.filter(
+            is_active=True,
+            resource__is_approved=True,
+            resource__competencies__subject=subject,
+            assigned_classes__id__in=class_ids,
+        )
+        .exclude(resource__purpose__in=[LearningResource.Purpose.RECOVERY, LearningResource.Purpose.ENRICHMENT])
+        .distinct()
+    )
 
 
 def incomplete_prerequisite_assignments(assessment, student):

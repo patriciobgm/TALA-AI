@@ -6,3 +6,8 @@ button, input, textarea { font: inherit; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 *:focus-visible { outline: 3px solid rgba(37, 99, 166, .28); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+@media print {
+  .tala-app-navigation, .tala-app-header, .evidence-report button { display: none !important; }
+  .evidence-report { color: #111; }
+  .evidence-report .MuiCard-root { break-inside: avoid; box-shadow: none; }
+}

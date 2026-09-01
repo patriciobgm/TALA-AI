@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.db.models import Avg
 
-from .models import ActivityAttempt, LearnerCompetencyEvidence, LearningRecommendationDecision, LearningResource
+from .models import ActivityAttempt, AdaptiveLearningState, LearnerCompetencyEvidence, LearnerMisconception, LearningGoal, LearningRecommendationDecision, LearningResource
 
 
 RECOMMENDATION_ALGORITHM_VERSION = "evidence-rank-v1"
@@ -44,6 +44,9 @@ def learner_competency_context(student, competency):
             "score": round(float(attempt.score)),
             "attempted_answers": len(attempt.answers),
         })
+    adaptive, _ = AdaptiveLearningState.objects.get_or_create(student=student, competency=competency)
+    active_signals = LearnerMisconception.objects.filter(student=student, misconception__competency=competency, status__in=[LearnerMisconception.Status.DETECTED, LearnerMisconception.Status.CONFIRMED]).select_related("misconception")[:5]
+    goal = LearningGoal.objects.filter(student=student, competency=competency, status=LearningGoal.Status.ACTIVE).first()
     return {
         "baseline_score": round(float(getattr(latest, "score", 0) or 0)) if latest else None,
         "practice_average": round(float(average)) if average is not None else None,
@@ -53,11 +56,21 @@ def learner_competency_context(student, competency):
             for item in evidence[:5]
         ],
         "recent_difficulties": misconceptions,
+        "adaptive_level": adaptive.level,
+        "adaptive_reason": adaptive.reason,
+        "misconceptions": [{"title": item.misconception.title, "status": item.status, "confidence": item.confidence} for item in active_signals],
+        "learning_goal": {"title": goal.title, "target_score": goal.target_score, "progress_percent": goal.progress_percent} if goal else None,
     }
 
 
 def format_learner_context(context):
     lines = []
+    lines.append(f"Current ungraded support level: {context['adaptive_level']}.")
+    if context.get("learning_goal"):
+        goal = context["learning_goal"]
+        lines.append(f"Active learning goal: {goal['title']} (target {goal['target_score']}%, progress {goal['progress_percent']}%).")
+    for item in context.get("misconceptions", [])[:2]:
+        lines.append(f"Reviewable learning difficulty: {item['title']} ({item['status']}, {item['confidence']}% confidence).")
     if context["practice_average"] is not None:
         lines.append(f"Recent practice average: {context['practice_average']}% across {context['practice_attempts']} attempts.")
     for item in context["recent_evidence"][:3]:

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, LinearProgress, MenuItem, Stack, TextField, Typography } from '@mui/material';
-import { ArrowBack, CheckCircleOutline, EditOutlined } from '@mui/icons-material';
+import { ArrowBack, CheckCircleOutline, EditOutlined, FactCheckOutlined } from '@mui/icons-material';
 import { api } from '../api/client';
 import type { CompetencyResult, LearnerDetail, LearnerEvidence, LearningRecommendation } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
 import { StatusChip } from '../components/StatusChip';
 import { LearningRecommendations } from '../components/LearningRecommendations';
 import { useTeachingScope } from '../components/TeachingScopeContext';
+import { EvidenceViewPage } from './EvidenceViewPage';
 
 export function LearnerProfile({ learnerId, onBack }: { learnerId: number; onBack: () => void }) {
   const [data, setData] = useState<LearnerDetail | null>(null);
@@ -21,12 +22,14 @@ export function LearnerProfile({ learnerId, onBack }: { learnerId: number; onBac
   const [aiRecommendation, setAiRecommendation] = useState<{ action: string; note: string; competency: string } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [recommendationBusy, setRecommendationBusy] = useState('');
+  const [showEvidenceReport, setShowEvidenceReport] = useState(false);
   const scope = useTeachingScope();
   const subjectQuery = scope?.selectedSubjectId ? `?subject=${scope.selectedSubjectId}` : '';
   const load = useCallback(() => api<LearnerDetail>(`/dashboard/teacher/learners/${learnerId}/${subjectQuery}`).then(setData).catch(reason => setError(reason.message)), [learnerId, subjectQuery]);
   useEffect(() => { void load(); }, [load]);
   if (!data && !error) return <Box sx={{ minHeight: 360, display: 'grid', placeItems: 'center' }}><CircularProgress size={28} /></Box>;
   if (!data) return <><Button startIcon={<ArrowBack />} onClick={onBack}>Back</Button><Alert severity="error" sx={{ mt: 2 }}>{error}</Alert></>;
+  if (showEvidenceReport) return <><Button startIcon={<ArrowBack />} onClick={() => setShowEvidenceReport(false)} sx={{ mb: 1.5, px: 0 }}>Back to learner profile</Button><EvidenceViewPage studentId={learnerId} subjectId={scope?.selectedSubjectId} /></>;
 
   const latestAttempt = data.attempts.at(-1);
   const baseline = data.attempts[0];
@@ -81,9 +84,10 @@ export function LearnerProfile({ learnerId, onBack }: { learnerId: number; onBac
 
   return <>
     <Button startIcon={<ArrowBack />} onClick={onBack} sx={{ mb: 1.5, px: 0 }}>Back to learners</Button>
-    <PageHeader title={data.student.name} description={`${data.student.section} · ${data.student.email}`} action={<Stack direction="row" gap={1}><StatusChip label={learnerStatus} size="medium" /><Button variant="contained" onClick={() => openIntervention()}>Record Intervention</Button></Stack>} />
+    <PageHeader title={data.student.name} description={`${data.student.section} · ${data.student.email}`} action={<Stack direction="row" gap={1} useFlexGap flexWrap="wrap"><StatusChip label={learnerStatus} size="medium" /><Button variant="outlined" startIcon={<FactCheckOutlined />} onClick={() => setShowEvidenceReport(true)}>Learning Support Record</Button><Button variant="contained" onClick={() => openIntervention()}>Record Intervention</Button></Stack>} />
     {successMessage && <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccessMessage('')}>{successMessage}</Alert>}
     {error && <Alert severity="error" sx={{ mb: 3 }}>{error}</Alert>}
+    {data.help_requests?.filter(item => item.status === 'open').map(item => <Alert key={item.id} severity="warning" sx={{ mb: 2 }} action={<Button color="inherit" size="small" onClick={() => openIntervention({ action: 'guided_practice', note: `TALA handoff for ${item.competency}: ${item.summary}` })}>Record follow-up</Button>}><Typography variant="body2" fontWeight={750}>Student selected “I Still Need Help” · {item.competency}</Typography><Typography variant="body2">{item.summary}</Typography><Typography variant="caption">{new Date(item.created_at).toLocaleString()}</Typography></Alert>)}
     {data.remedial_exams.length > 0 && <Card sx={{ mb: 3 }}><Box sx={{ p: 2.5 }}><Typography variant="h2">Remedial exam consent</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>The system recommends eligibility from mastery evidence. You confirm whether the learner needs the exam before requesting guardian consent.</Typography></Box><Divider /><Stack divider={<Divider />}>{data.remedial_exams.map(exam => <Box key={exam.id} sx={{ p: 2.5, display: 'flex', alignItems: { xs: 'stretch', sm: 'center' }, flexDirection: { xs: 'column', sm: 'row' }, gap: 2 }}><Box sx={{ flex: 1 }}><Typography variant="body2" fontWeight={700}>{exam.title}</Typography><Typography variant="caption" color="text.secondary">{exam.eligible ? 'Recovery requirements completed' : `${exam.remaining_activities} recovery activities remaining`}</Typography><Typography variant="caption" sx={{ display: 'block', textTransform: 'capitalize' }}>Eligibility: {exam.eligibility_status.replace('_', ' ')}</Typography>{exam.eligibility_reason && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{exam.eligibility_reason}</Typography>}{exam.guardian_name && <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Guardian: {exam.guardian_name}{exam.evidence_attached ? ' · Signed document attached' : ''}</Typography>}</Box><StatusChip label={exam.consent_status.replace('_', ' ')} />{exam.consent_status !== 'approved' && <Button variant="outlined" size="small" disabled={!exam.eligible || consentBusy === exam.id} onClick={() => void requestConsent(exam.id)}>{consentBusy === exam.id ? 'Sending…' : exam.consent_status === 'requested' ? 'Resend consent request' : exam.eligibility_status === 'eligible' ? 'Request parent consent' : 'Confirm & request consent'}</Button>}{!['approved', 'completed', 'exempted'].includes(exam.eligibility_status) && <Button color="inherit" size="small" disabled={consentBusy === exam.id} onClick={() => void exemptRemedial(exam.id)}>Not required</Button>}</Box>)}</Stack></Card>}
     <Card sx={{ mb: 3, p: 2.5, borderLeft: '3px solid', borderLeftColor: 'primary.main' }}><Stack direction={{ xs: 'column', lg: 'row' }} alignItems={{ lg: 'flex-start' }} gap={2}><Box sx={{ flex: 1 }}><Typography variant="overline" color="primary.main" fontWeight={800}>TALA Decision Support</Typography><Typography variant="h2">Evidence-Grounded Next Step</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>TALA summarizes recorded evidence and proposes a teacher action. Review it before creating an intervention record; it never changes grades or assignments automatically.</Typography>{aiInsight && <Typography variant="body2" sx={{ mt: 2, whiteSpace: 'pre-line', lineHeight: 1.7 }}>{aiInsight}</Typography>}{aiRecommendation && <Box sx={{ mt: 2, p: 2, bgcolor: '#f4f7f9', border: '1px solid', borderColor: 'divider', borderRadius: 1 }}><Typography variant="body2" fontWeight={750}>Recommended teacher action{aiRecommendation.competency ? ` · ${aiRecommendation.competency}` : ''}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{aiRecommendation.note}</Typography><Button size="small" variant="contained" sx={{ mt: 1.5 }} onClick={() => openIntervention(aiRecommendation)}>Create Intervention Record</Button></Box>}</Box><Button variant={aiInsight ? 'outlined' : 'contained'} disabled={aiBusy} onClick={() => void generateInsight()}>{aiBusy ? 'Analyzing…' : aiInsight ? 'Refresh Insight' : 'Generate Insight'}</Button></Stack></Card>
     <LearningRecommendations recommendations={data.recommendations} busyKey={recommendationBusy} onDecision={(recommendation, decision) => void decideRecommendation(recommendation, decision)} />

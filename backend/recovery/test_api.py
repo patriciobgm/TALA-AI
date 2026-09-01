@@ -1,5 +1,6 @@
 import json
 import tempfile
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -7,6 +8,7 @@ from django.core import signing
 from django.core.cache import cache
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, transaction
 from django.test import override_settings
 from django.utils import timezone
 from docx import Document
@@ -17,8 +19,10 @@ from .account_security import _totp
 from .content_imports import _extract_pdf, generate_grounded_practice_questions, parse_module_questions
 from .learning_intelligence import rank_learning_resources
 from .llm.base import LLMResponse
-from .models import AIMessage, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Competency, CompetencyResult, ContentImport, EnrollmentRequest, LearnerCompetencyEvidence, LearningAssignment, LearningResource, LearningResourceChunk, Notification, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentProfile, Subject, UserProfile
+from .models import AICompanionSession, AIHelpRequest, AIMessage, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Competency, CompetencyResult, ContentImport, EnrollmentRequest, LearnerCompetencyEvidence, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, UserProfile
 from .services import create_recovery_plan
+from .companion_intelligence import record_question_outcome
+from .tasks import generate_inactivity_reminders
 
 class RecoveryApiTests(APITestCase):
     @classmethod
@@ -36,6 +40,91 @@ class RecoveryApiTests(APITestCase):
 
     def correct_practice_answers(self, activity):
         return {str(question.id): question.correct_answer for question in activity.resource.practice_questions.all()}
+
+    def test_companion_v1_session_help_handoff_and_evidence_flow(self):
+        self.authenticate()
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        plan = RecoveryPlan.objects.filter(student=student, status="active").select_related("competency").first()
+        self.assertIsNotNone(plan)
+
+        dashboard = self.client.get(f"/api/tutor/companion/?subject={plan.competency.subject_id}")
+        self.assertEqual(dashboard.status_code, 200, dashboard.data)
+        self.assertEqual(dashboard.data["active_plan"]["id"], plan.id)
+        session = self.client.post("/api/tutor/companion/sessions/", {"plan_id": plan.id, "goal": "Understand this competency"}, format="json")
+        self.assertEqual(session.status_code, 201, session.data)
+        completed = self.client.patch(f"/api/tutor/companion/sessions/{session.data['id']}/", {"complete": True}, format="json")
+        self.assertEqual(completed.status_code, 200, completed.data)
+        self.assertTrue(completed.data["summary"])
+        next_session = self.client.post("/api/tutor/companion/sessions/", {"plan_id": plan.id, "goal": "Practice independently"}, format="json")
+        self.assertEqual(next_session.status_code, 201, next_session.data)
+        self.assertNotEqual(next_session.data["id"], session.data["id"])
+        help_response = self.client.post("/api/tutor/companion/help/", {"plan_id": plan.id, "session_id": next_session.data["id"], "note": "I still need a worked example."}, format="json")
+        self.assertEqual(help_response.status_code, 201, help_response.data)
+        self.assertTrue(AIHelpRequest.objects.filter(pk=help_response.data["id"], student=student).exists())
+        self.assertTrue(AICompanionSession.objects.filter(pk=session.data["id"], completed_at__isnull=False, summary__gt="").exists())
+        evidence = self.client.get(f"/api/tutor/evidence/?subject={plan.competency.subject_id}")
+        self.assertEqual(evidence.status_code, 200, evidence.data)
+        self.assertIn("plans", evidence.data)
+        self.assertIn("attempts", evidence.data)
+
+        self.authenticate("teacher@tala.edu.ph")
+        learner = self.client.get(f"/api/dashboard/teacher/learners/{student.id}/?subject={plan.competency.subject_id}")
+        self.assertEqual(learner.status_code, 200, learner.data)
+        self.assertTrue(any(item["id"] == help_response.data["id"] for item in learner.data["help_requests"]))
+
+    def test_companion_v2a_goal_misconception_adaptation_and_teacher_review(self):
+        self.authenticate()
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        plan = RecoveryPlan.objects.filter(student=student, status="active").select_related("competency").first()
+        goal = self.client.post("/api/tutor/goals/", {"competency": plan.competency_id, "title": "Reach mastery with independent practice", "target_score": 80}, format="json")
+        self.assertEqual(goal.status_code, 201, goal.data)
+        self.assertTrue(LearningGoal.objects.filter(pk=goal.data["id"], status="active").exists())
+        question = Question.objects.filter(competency=plan.competency).first()
+        tag = Misconception.objects.create(competency=plan.competency, code="v2-test", title="Test misconception")
+        question.misconceptions.add(tag)
+        record_question_outcome(student=student, question=question, correct=False)
+        record_question_outcome(student=student, question=question, correct=False)
+        signal = LearnerMisconception.objects.get(student=student, misconception=tag)
+        self.assertEqual(signal.occurrence_count, 2)
+        self.assertEqual(AdaptiveLearningState.objects.get(student=student, competency=plan.competency).level, "foundation")
+        dashboard = self.client.get(f"/api/tutor/companion/?subject={plan.competency.subject_id}")
+        self.assertEqual(dashboard.status_code, 200, dashboard.data)
+        self.assertTrue(dashboard.data["goals"])
+        self.assertTrue(dashboard.data["learning_focus"])
+        self.authenticate("teacher@tala.edu.ph")
+        signals = self.client.get(f"/api/tutor/misconception-signals/?subject={plan.competency.subject_id}")
+        self.assertEqual(signals.status_code, 200, signals.data)
+        reviewed = self.client.patch("/api/tutor/misconception-signals/", {"id": signal.id, "status": "confirmed"}, format="json")
+        self.assertEqual(reviewed.status_code, 200, reviewed.data)
+        analytics = self.client.get(f"/api/tutor/companion/analytics/?subject={plan.competency.subject_id}")
+        self.assertEqual(analytics.status_code, 200, analytics.data)
+        self.assertGreaterEqual(analytics.data["summary"]["active_misconceptions"], 1)
+
+    def test_companion_v2a_inactivity_reminder_is_deduplicated(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        plan = RecoveryPlan.objects.filter(student=student, status="active").first()
+        ActivityAttempt.objects.filter(activity__plan=plan).delete()
+        AICompanionSession.objects.filter(conversation__plan=plan).delete()
+        RecoveryPlan.objects.filter(pk=plan.id).update(created_at=timezone.now() - timedelta(days=10))
+        generate_inactivity_reminders()
+        first_count = Notification.objects.filter(recipient=student, deduplication_key__startswith=f"plan:{plan.id}:inactive:").count()
+        generate_inactivity_reminders()
+        second_count = Notification.objects.filter(recipient=student, deduplication_key__startswith=f"plan:{plan.id}:inactive:").count()
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, first_count)
+
+    def test_database_prevents_duplicate_active_recovery_plans(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        plan = RecoveryPlan.objects.filter(student=student, status="active").first()
+        self.assertIsNotNone(plan)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            RecoveryPlan.objects.create(student=student, competency=plan.competency, baseline_score=plan.baseline_score, status="active")
+
+    def test_admin_can_configure_developing_support_policy(self):
+        self.authenticate("admin@tala.edu.ph")
+        response = self.client.patch("/api/system/configuration/", {"developing_support_policy": "monitor"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["developing_support_policy"], "monitor")
 
     @patch("pypdf.PdfReader")
     def test_pdf_extraction_reads_reader_pages(self, reader_class):
@@ -112,14 +201,24 @@ References
         self.assertTrue(PrivacyAcknowledgment.objects.filter(user=student, policy_version=current.data["policy_version"]).exists())
         self.assertFalse(self.client.get("/api/auth/me/").data["privacy_acknowledgment_required"])
 
+    def test_student_profile_displays_class_and_cluster_assignment(self):
+        self.authenticate()
+        response = self.client.get("/api/auth/profile/")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["cluster"], "academics")
+        self.assertEqual(response.data["assignments"][0], "Grade 11 – Rizal")
+        self.assertEqual(response.data["assignments"][1], "Cluster · Academics")
+
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_new_student_gets_onboarding_email_and_must_change_password(self):
         from django.core import mail
         self.authenticate("admin@tala.edu.ph")
-        created = self.client.post("/api/users/", {"name": "New ARAL Learner", "email": "new.aral@tala.edu.ph", "role": "student", "password": "temporary-password-42", "academic_class": None, "is_active": True}, format="json")
+        created = self.client.post("/api/users/", {"name": "New ARAL Learner", "email": "new.aral@tala.edu.ph", "role": "student", "password": "temporary-password-42", "grade_level": 11, "cluster": "tech_pro", "is_active": True}, format="json")
         self.assertEqual(created.status_code, 201, created.data)
         self.assertTrue(created.data["must_change_password"])
         self.assertEqual(created.data["assignment"], "Unassigned")
+        self.assertEqual(created.data["cluster"], "tech_pro")
+        self.assertIsNone(get_user_model().objects.get(email="new.aral@tala.edu.ph").tala_profile.academic_class_id)
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("set your password", mail.outbox[0].subject.lower())
         self.assertIn("/reset-password?", mail.outbox[0].body)
@@ -344,6 +443,34 @@ References
         self.assertEqual(edited.status_code, 200, edited.data)
         self.assertIn("revised", edited.data["prompt"])
 
+    def test_short_essay_waits_for_teacher_score_before_competency_results(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        academic_class = student.tala_profile.academic_class
+        subject = Subject.objects.filter(grade_level=academic_class.grade_level, competencies__is_active=True).distinct().first()
+        competency = subject.competencies.filter(is_active=True).first()
+        admin = get_user_model().objects.get(username="admin@tala.edu.ph")
+        assessment = Assessment.objects.create(title="Short essay grading test", subject=subject, kind=Assessment.Kind.PRE, created_by=admin, is_active=True)
+        assessment.assigned_classes.add(academic_class)
+        question = Question.objects.create(assessment=assessment, competency=competency, prompt="Explain the idea in your own words.", question_type=Question.QuestionType.ESSAY, options=[], correct_answer="A clear explanation using the central concept.", character_limit=300)
+
+        self.authenticate("student@tala.edu.ph")
+        submitted = self.client.post(f"/api/assessments/{assessment.id}/submit/", {"answers": [{"question_id": question.id, "answer": "This is my reasoned explanation of the central concept."}]}, format="json")
+        self.assertEqual(submitted.status_code, 201, submitted.data)
+        self.assertEqual(submitted.data["grading_status"], AssessmentAttempt.GradingStatus.PENDING_REVIEW)
+        self.assertIsNone(submitted.data["score"])
+        attempt = AssessmentAttempt.objects.get(pk=submitted.data["id"])
+        self.assertFalse(attempt.competency_results.exists())
+
+        self.authenticate("admin@tala.edu.ph")
+        pending = self.client.get(f"/api/assessments/{assessment.id}/essay-reviews/")
+        self.assertEqual(pending.status_code, 200, pending.data)
+        answer = StudentAnswer.objects.get(attempt=attempt, question=question)
+        scored = self.client.post(f"/api/assessments/{assessment.id}/essay-reviews/{attempt.id}/", {"grades": [{"answer_id": answer.id, "score": 80, "feedback": "Clear explanation."}]}, format="json")
+        self.assertEqual(scored.status_code, 200, scored.data)
+        self.assertEqual(scored.data["grading_status"], AssessmentAttempt.GradingStatus.TEACHER_SCORED)
+        self.assertEqual(float(scored.data["score"]), 80.0)
+        self.assertTrue(attempt.competency_results.filter(competency=competency, score=80).exists())
+
     def test_teacher_assessment_automatically_uses_subject_classes(self):
         self.authenticate("teacher@tala.edu.ph")
         teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
@@ -419,12 +546,65 @@ References
         diagnostic.prerequisite_assignments.add(assignment)
         self.authenticate()
 
+        listed = self.client.get(f"/api/assessments/?subject={diagnostic.subject_id}")
+        self.assertEqual(listed.status_code, 200, listed.data)
+        listed_rows = listed.data if isinstance(listed.data, list) else listed.data["results"]
+        diagnostic_row = next(item for item in listed_rows if item["id"] == diagnostic.id)
+        requirement = next(item for item in diagnostic_row["prerequisite_statuses"] if item["assignment_id"] == assignment.id)
+        self.assertFalse(requirement["completed"])
+        self.assertFalse(requirement["quiz_required"])
         blocked = self.client.get(f"/api/assessments/{diagnostic.id}/start/")
         self.assertEqual(blocked.status_code, 409, blocked.data)
         completed = self.client.post(f"/api/learning-assignments/{assignment.id}/complete/", {}, format="json")
         self.assertEqual(completed.status_code, 200, completed.data)
+        listed = self.client.get(f"/api/assessments/?subject={diagnostic.subject_id}")
+        listed_rows = listed.data if isinstance(listed.data, list) else listed.data["results"]
+        diagnostic_row = next(item for item in listed_rows if item["id"] == diagnostic.id)
+        requirement = next(item for item in diagnostic_row["prerequisite_statuses"] if item["assignment_id"] == assignment.id)
+        self.assertTrue(requirement["completed"])
         started = self.client.get(f"/api/assessments/{diagnostic.id}/start/")
         self.assertEqual(started.status_code, 200, started.data)
+
+    def test_new_diagnostic_defaults_to_matching_class_materials_and_allows_teacher_exclusion(self):
+        teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
+        subject = Subject.objects.get(code="GM")
+        competency = Competency.objects.get(code="GM-01")
+        academic_class = teacher.tala_profile.assigned_classes.filter(grade_level=subject.grade_level).first()
+        material = LearningResource.objects.create(title="Automatic diagnostic preparation", resource_type=LearningResource.ResourceType.MODULE, content="Preparation", is_approved=True, uploaded_by=teacher)
+        material.competencies.add(competency)
+        assignment = LearningAssignment.objects.create(resource=material, assigned_by=teacher)
+        assignment.assigned_classes.add(academic_class)
+        self.authenticate("teacher@tala.edu.ph")
+
+        automatic = self.client.post("/api/assessments/", {"title": "Automatic prerequisites diagnostic", "subject": subject.id, "kind": "pre", "instructions": "", "due_at": None}, format="json")
+        self.assertEqual(automatic.status_code, 201, automatic.data)
+        self.assertIn(assignment.id, automatic.data["prerequisite_assignments"])
+        excluded = self.client.post("/api/assessments/", {"title": "Teacher-excluded prerequisites diagnostic", "subject": subject.id, "kind": "pre", "instructions": "", "due_at": None, "prerequisite_assignments": []}, format="json")
+        self.assertEqual(excluded.status_code, 201, excluded.data)
+        self.assertEqual(excluded.data["prerequisite_assignments"], [])
+
+    def test_learning_material_completed_after_diagnostic_satisfies_matching_recovery_activity(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
+        diagnostic = Assessment.objects.get(kind=Assessment.Kind.PRE, subject__code="GM")
+        competency = Competency.objects.get(code="GM-01")
+        RecoveryPlan.objects.filter(student=student, competency=competency).delete()
+        trigger = AssessmentAttempt.objects.create(assessment=diagnostic, student=student, submitted_at=timezone.now(), score=40)
+        plan = RecoveryPlan.objects.create(student=student, competency=competency, baseline_score=40, trigger_status="remediation", trigger_attempt=trigger)
+        material = LearningResource.objects.create(title="Shared recovery module", resource_type=LearningResource.ResourceType.MODULE, content="Review this material.", is_approved=True, uploaded_by=teacher)
+        material.competencies.add(competency)
+        question = material.practice_questions.create(prompt="Choose the correct response.", question_type="mcq", options=["Correct", "Incorrect"], correct_answer="Correct")
+        assignment = LearningAssignment.objects.create(resource=material, assigned_by=teacher)
+        assignment.assigned_classes.add(student.tala_profile.academic_class)
+        activity = RecoveryActivity.objects.create(plan=plan, resource=material, title=material.title, position=1)
+        self.authenticate()
+
+        completed = self.client.post(f"/api/learning-assignments/{assignment.id}/submit-quiz/", {"answers": [{"question_id": question.id, "answer": "Correct"}]}, format="json")
+
+        self.assertEqual(completed.status_code, 201, completed.data)
+        self.assertTrue(completed.data["passed"])
+        activity.refresh_from_db()
+        self.assertIsNotNone(activity.completed_at)
 
     def test_remedial_exam_is_visible_only_after_teacher_confirms_student(self):
         student = get_user_model().objects.get(username="student@tala.edu.ph")
@@ -961,6 +1141,13 @@ References
             self.authenticate()
             blocked = self.client.post(f"/api/learning-assignments/{assignment.id}/complete/", {}, format="json")
             self.assertEqual(blocked.status_code, 409)
+            incorrect_answer = next(option for option in question.options if option != question.correct_answer)
+            failed = self.client.post(f"/api/learning-assignments/{assignment.id}/submit-quiz/", {"answers": [{"question_id": question.id, "answer": incorrect_answer}]}, format="json")
+            self.assertEqual(failed.status_code, 201, failed.data)
+            self.assertFalse(failed.data["passed"])
+            self.assertEqual(float(failed.data["assignment"]["latest_quiz_score"]), 0.0)
+            self.assertIsNone(failed.data["assignment"]["completed_at"])
+            self.assertEqual(assignment.quiz_attempts.filter(student__username="student@tala.edu.ph", passed=False).count(), 1)
             submitted = self.client.post(f"/api/learning-assignments/{assignment.id}/submit-quiz/", {"answers": [{"question_id": question.id, "answer": question.correct_answer}]}, format="json")
             self.assertEqual(submitted.status_code, 201, submitted.data)
             self.assertTrue(submitted.data["passed"])

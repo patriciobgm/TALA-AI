@@ -7,8 +7,8 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone
 
-from .models import Notification, NotificationDelivery, RecoveryActivity
-from .notifications import notify
+from .models import AICompanionSession, ActivityAttempt, Notification, NotificationDelivery, RecoveryActivity, RecoveryPlan, SystemConfiguration
+from .notifications import assigned_teachers_for, notify
 
 
 @shared_task(bind=True, autoretry_for=(OSError,), retry_backoff=True, retry_kwargs={"max_retries": 2})
@@ -45,6 +45,34 @@ def generate_due_reminders():
             deduplication_key=f"activity:{activity.id}:{kind}:{timezone.localdate().isoformat()}",
         )
         created += int(notification is not None)
+    return created
+
+
+@shared_task
+def generate_inactivity_reminders():
+    configuration = SystemConfiguration.load()
+    now = timezone.now()
+    cutoff = now - timedelta(days=configuration.inactivity_days)
+    cooldown = max(1, configuration.inactivity_reminder_cooldown_days)
+    bucket = timezone.localdate().toordinal() // cooldown
+    plans = RecoveryPlan.objects.filter(status="active", activities__completed_at__isnull=True).select_related("student", "competency").distinct()
+    created = 0
+    for plan in plans:
+        preference = getattr(plan.student, "notification_preference", None)
+        if preference and not preference.reminders_enabled:
+            continue
+        timestamps = [plan.created_at]
+        last_attempt = ActivityAttempt.objects.filter(activity__plan=plan, student=plan.student).order_by("-started_at").values_list("started_at", flat=True).first()
+        last_session = AICompanionSession.objects.filter(student=plan.student, conversation__plan=plan).order_by("-updated_at").values_list("updated_at", flat=True).first()
+        timestamps.extend(value for value in [last_attempt, last_session] if value)
+        last_activity = max(timestamps)
+        if last_activity > cutoff:
+            continue
+        notification = notify(recipient=plan.student, kind=Notification.Kind.PLAN_PROGRESS, title="Continue your learning support", message=f"Your next activity for {plan.competency.title} is ready when you are.", action_url="/recovery", deduplication_key=f"plan:{plan.id}:inactive:{bucket}")
+        created += int(notification is not None)
+        if last_activity <= now - timedelta(days=configuration.inactivity_days * 2):
+            for teacher in assigned_teachers_for(plan.student):
+                notify(recipient=teacher, kind=Notification.Kind.INTERVENTION, title="Learner may need a follow-up", message=f"{plan.student.get_full_name() or plan.student.username} has not continued {plan.competency.title} support recently.", action_url=f"/learners/{plan.student_id}", deduplication_key=f"plan:{plan.id}:inactive-teacher:{bucket}:{teacher.id}")
     return created
 
 
