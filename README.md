@@ -100,7 +100,7 @@ curl http://127.0.0.1:8080/v1/models
 ### Terminal 2 — Django API
 
 ```bash
-cd /Users/patriciobgm/Projects/TALA-AI/backend
+cd "/Volumes/Mac Data/Projects/TALA-AI/backend"
 source .venv/bin/activate
 set -a
 source .env
@@ -119,7 +119,7 @@ curl http://192.168.100.132:8000/api/health/
 ### Terminal 3 — web application
 
 ```bash
-cd /Users/patriciobgm/Projects/TALA-AI/frontend
+cd "/Volumes/Mac Data/Projects/TALA-AI/frontend"
 npm run dev
 ```
 
@@ -128,7 +128,7 @@ Open `http://localhost:5173`.
 ### Terminal 4 — mobile application, when needed
 
 ```bash
-cd /Users/patriciobgm/Projects/TALA-AI/mobile
+cd "/Volumes/Mac Data/Projects/TALA-AI/mobile"
 npx expo start --clear
 ```
 
@@ -164,7 +164,7 @@ The final command should report that it cannot connect.
 When using the production-like Docker stack, do not start the backend and frontend commands above separately:
 
 ```bash
-cd /Users/patriciobgm/Projects/TALA-AI
+cd "/Volumes/Mac Data/Projects/TALA-AI"
 docker compose up --build -d
 docker compose ps
 ```
