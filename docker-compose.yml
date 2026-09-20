@@ -42,6 +42,8 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-local-development}
       LLM_MODEL: ${LLM_MODEL:-llama-local}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      JWT_ACCESS_MINUTES: ${JWT_ACCESS_MINUTES:-15}
+      JWT_REFRESH_DAYS: ${JWT_REFRESH_DAYS:-7}
       WHISPER_ENABLED: ${WHISPER_ENABLED:-false}
       WHISPER_CLI_PATH: ${WHISPER_CLI_PATH:-/usr/local/bin/whisper-cli}
       WHISPER_MODEL_PATH: ${WHISPER_MODEL_PATH:-/opt/whisper/models/ggml-base.bin}
@@ -51,6 +53,7 @@ services:
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-false}
       DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-TALA-AI <noreply@localhost>}
+      EMAIL_BACKEND: ${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles

@@ -12,14 +12,14 @@ from django.db import IntegrityError, transaction
 from django.test import override_settings
 from django.utils import timezone
 from docx import Document
-from io import BytesIO
+from io import BytesIO, StringIO
 from urllib.parse import urlsplit
 from rest_framework.test import APITestCase
 from .account_security import _totp
 from .content_imports import _extract_pdf, generate_grounded_practice_questions, parse_module_questions
 from .learning_intelligence import rank_learning_resources
-from .llm.base import LLMResponse
-from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, UserProfile
+from .llm.base import LLMResponse, LLMUnavailable
+from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EmployeeProfile, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, UserProfile
 from .services import create_recovery_plan
 from .progression_engine import apply_competency_result
 from .companion_intelligence import record_question_outcome
@@ -987,6 +987,21 @@ References
         self.assertEqual(generated.competency, competency)
         self.assertFalse(assessment.is_active)
 
+    @patch("recovery.views.get_llm_provider")
+    def test_ai_question_failure_is_graceful_and_does_not_change_draft(self, provider_factory):
+        self.authenticate("teacher@tala.edu.ph")
+        assessment = Assessment.objects.filter(subject__in=get_user_model().objects.get(username="teacher@tala.edu.ph").tala_profile.assigned_subjects.all()).first()
+        assessment.is_active = False
+        assessment.save(update_fields=["is_active"])
+        competency = Competency.objects.filter(subject=assessment.subject, is_active=True).first()
+        before = assessment.questions.count()
+        provider_factory.return_value.generate.side_effect = LLMUnavailable("TALA assistance is temporarily unavailable.")
+
+        response = self.client.post(f"/api/assessments/{assessment.id}/generate-questions/", {"competency_ids": [competency.id], "count": 1, "question_type": "mcq"}, format="json")
+
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertEqual(assessment.questions.count(), before)
+
     def test_teacher_can_delete_unused_draft_assessment_but_not_learner_records(self):
         self.authenticate("teacher@tala.edu.ph")
         teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
@@ -1362,7 +1377,6 @@ Answer: B
             "cluster": cluster["id"],
             "grade_level": section["grade_level"],
             "section": section["id"],
-            "adviser": section["adviser"],
         }, format="json")
 
         self.assertEqual(created.status_code, 201, created.data)
@@ -1372,6 +1386,59 @@ Answer: B
         denied = self.client.post("/api/auth/login/", {"username": email, "password": "A-Strong-Password-2026!"}, format="json")
         self.assertEqual(denied.status_code, 400)
         self.assertTrue(Notification.objects.filter(title="Learner registration awaiting review", recipient__tala_profile__role=UserProfile.Role.ADMIN).exists())
+
+    def test_teacher_registration_requires_admin_approval_and_persists_cluster(self):
+        cluster = Cluster.objects.get(code="TECH-PRO")
+        email = "pending.teacher@example.edu.ph"
+        created = self.client.post("/api/auth/register-teacher/", {"email": email, "password": "A-Strong-Password-2026!", "name": "Pending Teacher", "cluster": cluster.id}, format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        teacher = get_user_model().objects.get(username=email)
+        self.assertFalse(teacher.tala_profile.is_active)
+        self.assertEqual(EmployeeProfile.objects.get(profile=teacher.tala_profile).cluster, cluster)
+        denied = self.client.post("/api/auth/login/", {"username": email, "password": "A-Strong-Password-2026!"}, format="json")
+        self.assertEqual(denied.status_code, 400)
+        self.authenticate("admin@tala.edu.ph")
+        approved = self.client.post(f"/api/users/{teacher.id}/approve/", format="json")
+        self.assertEqual(approved.status_code, 200, approved.data)
+        self.client.credentials()
+        signed_in = self.client.post("/api/auth/login/", {"username": email, "password": "A-Strong-Password-2026!"}, format="json")
+        self.assertEqual(signed_in.status_code, 200, signed_in.data)
+
+    def test_admin_creates_teacher_with_cluster_and_compatible_subjects(self):
+        self.authenticate("admin@tala.edu.ph")
+        cluster = Cluster.objects.get(code="ACADEMIC")
+        subject = Subject.objects.filter(clusters=cluster, is_active=True).first()
+        created = self.client.post("/api/users/", {"name": "Cluster Teacher", "email": "cluster.teacher@example.edu.ph", "role": "teacher", "password": "A-Strong-Password-2026!", "cluster_record": cluster.id, "assigned_subjects": [subject.id], "is_active": True}, format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        teacher = get_user_model().objects.get(username="cluster.teacher@example.edu.ph")
+        self.assertEqual(teacher.tala_profile.employee_details.cluster, cluster)
+        self.assertEqual(list(teacher.tala_profile.assigned_subjects.values_list("id", flat=True)), [subject.id])
+
+    def test_five_recovery_reports_are_teacher_scoped(self):
+        teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
+        subject = teacher.tala_profile.assigned_subjects.first()
+        self.authenticate(teacher.username)
+        response = self.client.get(f"/api/reports/academic-recovery/?subject={subject.id}")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(set(response.data) - {"generated_at", "filters"}, {"learner_recovery", "class_subject_recovery", "assessment_performance", "learning_gaps", "interventions"})
+        for row in response.data["assessment_performance"]:
+            self.assertEqual(row["subject"], subject.name)
+        unauthorized = Subject.objects.exclude(pk__in=teacher.tala_profile.assigned_subjects.all()).first()
+        if unauthorized:
+            denied = self.client.get(f"/api/reports/academic-recovery/?subject={unauthorized.id}")
+            self.assertEqual(denied.status_code, 403, denied.data)
+
+    def test_integrity_and_ai_evaluation_commands_produce_machine_readable_results(self):
+        integrity_output = StringIO()
+        call_command("audit_academic_integrity", "--json", stdout=integrity_output)
+        integrity = json.loads(integrity_output.getvalue())
+        self.assertIn("issues", integrity)
+        self.assertIn("error_count", integrity)
+        ai_output = StringIO()
+        call_command("ai_evaluation_summary", stdout=ai_output)
+        evaluation = json.loads(ai_output.getvalue())
+        self.assertIn("human_review_coverage_percent", evaluation)
+        self.assertIn("notice", evaluation)
 
     def test_subject_enrollment_prevents_duplicate_current_record(self):
         student = get_user_model().objects.get(username="student@tala.edu.ph")

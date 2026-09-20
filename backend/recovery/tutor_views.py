@@ -81,6 +81,7 @@ def learner_support_insight(request, student_id):
     try:
         response = get_llm_provider().generate(LLMRequest(system=system, messages=[{"role": "user", "content": prompt}], temperature=0.1, max_tokens=450))
     except LLMUnavailable as exc:
+        AuditEvent.objects.create(actor=request.user, action="ai.service_unavailable", object_type="User", object_id=str(student.id), metadata={"operation": "learner_support_insight", "error_type": type(exc).__name__})
         return Response({"detail": str(exc), "code": "llm_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     offering = priority_plan.offering if priority_plan else SubjectEnrollment.objects.filter(student=student, status="approved", offering__teacher=request.user).select_related("offering").first()
     offering = offering.offering if hasattr(offering, "offering") else offering
@@ -132,6 +133,7 @@ def tutor_message(request, plan_id):
     try:
         llm_response, evidence, _learner_context = answer_student(plan, message, action, activity=activity, question=question, selected_answer=selected_answer, history=history)
     except LLMUnavailable as exc:
+        AuditEvent.objects.create(actor=request.user, action="ai.service_unavailable", object_type="RecoveryPlan", object_id=str(plan.id), metadata={"operation": "companion_message", "error_type": type(exc).__name__})
         return Response({"detail": str(exc), "code": "llm_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     citations = [{"number": index, "chunk_id": item.chunk_id, "resource_id": item.resource_id, "title": item.title, "resource_type": item.resource_type, "locator": item.locator, "excerpt": item.excerpt[:240]} for index, item in enumerate(evidence, start=1)]
     assistant = AIMessage.objects.create(conversation=conversation, role=AIMessage.Role.ASSISTANT, content=llm_response.text, action=action, provider=llm_response.provider, model=llm_response.model, source_resource_ids=sorted({item.resource_id for item in evidence}), source_citations=citations, grounding_status="grounded" if evidence else "insufficient_evidence", latency_ms=round((time.monotonic() - started) * 1000))
@@ -182,6 +184,7 @@ def learning_assignment_tutor_message(request, assignment_id):
     try:
         llm_response, evidence = answer_learning_assignment(assignment, request.user, message, action, question=question, selected_answer=selected_answer, history=history)
     except LLMUnavailable as exc:
+        AuditEvent.objects.create(actor=request.user, action="ai.service_unavailable", object_type="LearningAssignment", object_id=str(assignment.id), metadata={"operation": "learning_material_message", "error_type": type(exc).__name__})
         return Response({"detail": str(exc), "code": "llm_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     citations = [{"number": index, "chunk_id": item.chunk_id, "resource_id": item.resource_id, "title": item.title, "resource_type": item.resource_type, "locator": item.locator, "excerpt": item.excerpt[:240]} for index, item in enumerate(evidence, start=1)]
     assistant = AIMessage.objects.create(conversation=conversation, role=AIMessage.Role.ASSISTANT, content=llm_response.text, action=action, provider=llm_response.provider, model=llm_response.model, source_resource_ids=sorted({item.resource_id for item in evidence}), source_citations=citations, grounding_status="grounded" if evidence else "insufficient_evidence", latency_ms=round((time.monotonic() - started) * 1000))

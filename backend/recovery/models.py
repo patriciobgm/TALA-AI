@@ -133,7 +133,7 @@ class PrivacyAcknowledgment(models.Model):
 class StudentProfile(models.Model):
     class Cluster(models.TextChoices):
         ACADEMICS = "academics", "Academic"
-        TECH_PRO = "tech_pro", "Technical-Vocational (Tech-Voc)"
+        TECH_PRO = "tech_pro", "Technical Professional (Tech Pro)"
 
     profile = models.OneToOneField(UserProfile, related_name="student_details", on_delete=models.CASCADE)
     student_number = models.CharField(max_length=40, unique=True, null=True, blank=True)
@@ -146,6 +146,7 @@ class EmployeeProfile(models.Model):
     profile = models.OneToOneField(UserProfile, related_name="employee_details", on_delete=models.CASCADE)
     employee_id = models.CharField(max_length=40, unique=True, null=True, blank=True)
     job_title = models.CharField(max_length=100, blank=True)
+    cluster = models.ForeignKey("Cluster", null=True, blank=True, related_name="employees", on_delete=models.PROTECT)
 
 class EmergencyContact(models.Model):
     profile = models.ForeignKey(UserProfile, related_name="emergency_contacts", on_delete=models.CASCADE)

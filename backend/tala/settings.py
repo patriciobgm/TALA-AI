@@ -66,7 +66,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "recovery.pagination.StandardResultsSetPagination",
     "PAGE_SIZE": 25,
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle", "rest_framework.throttling.ScopedRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"anon": "300/hour", "user": "3000/hour", "login": "60/minute"},
+    "DEFAULT_THROTTLE_RATES": {"anon": "300/hour", "user": "3000/hour", "login": "60/minute", "registration": "10/hour"},
 }
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.getenv("JWT_ACCESS_MINUTES", "15"))),
@@ -101,6 +101,11 @@ EXPO_PUSH_URL = os.getenv("EXPO_PUSH_URL", "https://exp.host/--/api/v2/push/send
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "TALA-AI <noreply@tala.local>")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DATA_UPLOAD_MAX_MEMORY_SIZE", str(25 * 1024 * 1024)))
+FILE_UPLOAD_PERMISSIONS = 0o640
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 
 if not DEBUG:
     SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", True)

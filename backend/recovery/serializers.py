@@ -178,6 +178,16 @@ class UserAdminSerializer(serializers.Serializer):
                 raise serializers.ValidationError({"role": "You cannot change your own administrator role."})
         if not self.instance and not attrs.get("password"):
             raise serializers.ValidationError({"password": "A temporary password is required."})
+        if role == UserProfile.Role.TEACHER:
+            existing_employee = getattr(getattr(self.instance, "tala_profile", None), "employee_details", None)
+            cluster = attrs.get("cluster_record", getattr(existing_employee, "cluster", None))
+            if not cluster:
+                raise serializers.ValidationError({"cluster_record": "Choose the teacher's cluster."})
+            subjects = attrs.get("assigned_subjects")
+            if subjects is not None:
+                incompatible = [subject.name for subject in subjects if subject.clusters.exists() and not subject.clusters.filter(pk=cluster.pk).exists()]
+                if incompatible:
+                    raise serializers.ValidationError({"assigned_subjects": f"These subjects are outside {cluster.name}: {', '.join(incompatible)}."})
         return attrs
 
     def _apply_profile(self, user, validated_data):
@@ -197,7 +207,7 @@ class UserAdminSerializer(serializers.Serializer):
                 details.cluster = validated_data["cluster"]
             if "cluster_record" in validated_data:
                 details.cluster_record = validated_data["cluster_record"]
-                details.cluster = StudentProfile.Cluster.TECH_PRO if details.cluster_record and details.cluster_record.code == "TECH-VOC" else StudentProfile.Cluster.ACADEMICS
+                details.cluster = StudentProfile.Cluster.TECH_PRO if details.cluster_record and details.cluster_record.code == "TECH-PRO" else StudentProfile.Cluster.ACADEMICS
             if profile.academic_class_id:
                 details.grade_level = profile.academic_class.grade_level
             elif "grade_level" in validated_data:
@@ -207,6 +217,8 @@ class UserAdminSerializer(serializers.Serializer):
             details, _ = EmployeeProfile.objects.get_or_create(profile=profile)
             if "employee_id" in validated_data:
                 details.employee_id = validated_data["employee_id"] or None
+            if profile.role == UserProfile.Role.TEACHER and "cluster_record" in validated_data:
+                details.cluster = validated_data["cluster_record"]
             details.save()
         if profile.role == UserProfile.Role.TEACHER:
             if "assigned_subjects" in validated_data:
@@ -261,7 +273,11 @@ class UserAdminSerializer(serializers.Serializer):
         student_details = getattr(profile, "student_details", None)
         employee_details = getattr(profile, "employee_details", None)
         academic_class = profile.academic_class
-        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else student_details.grade_level if student_details else None, "cluster": student_details.cluster if student_details else "", "cluster_record": student_details.cluster_record_id if student_details else None, "cluster_name": student_details.cluster_record.name if student_details and student_details.cluster_record_id else student_details.get_cluster_display() if student_details else "", "section": academic_class.name if academic_class else "", "adviser": (academic_class.adviser.get_full_name() or academic_class.adviser.email) if academic_class and academic_class.adviser else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
+        cluster_record = student_details.cluster_record if student_details else employee_details.cluster if employee_details and profile.role == UserProfile.Role.TEACHER else None
+        pending_approval = False
+        if not profile.is_active:
+            pending_approval = AuditEvent.objects.filter(object_type="User", object_id=str(user.id), action__in=["account.registration_requested", "account.teacher_registration_requested"]).exists() and not AuditEvent.objects.filter(object_type="User", object_id=str(user.id), action="user.approved").exists()
+        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else student_details.grade_level if student_details else None, "cluster": student_details.cluster if student_details else "", "cluster_record": cluster_record.id if cluster_record else None, "cluster_name": cluster_record.name if cluster_record else student_details.get_cluster_display() if student_details else "", "section": academic_class.name if academic_class else "", "adviser": (academic_class.adviser.get_full_name() or academic_class.adviser.email) if academic_class and academic_class.adviser else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Pending approval" if pending_approval else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
 
 class CompetencySerializer(serializers.ModelSerializer):
     class Meta:

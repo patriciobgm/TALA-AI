@@ -10,18 +10,23 @@ from django.http import FileResponse
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import serializers, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .account_security import consume_recovery_code, decrypt_secret, encrypt_secret, generate_recovery_codes, generate_totp_secret, hash_recovery_codes, provisioning_uri, verify_totp
 from django.db import transaction
-from .models import AcademicClass, AuditEvent, Cluster, Notification, PrivacyAcknowledgment, StudentProfile, SystemConfiguration, UserProfile
+from .models import AcademicClass, AuditEvent, Cluster, EmployeeProfile, Notification, PrivacyAcknowledgment, StudentProfile, SystemConfiguration, UserProfile
 from .notifications import notify
 from .secure_media import validate_media_token
 from .serializers import ProfileSerializer
+
+
+class RegistrationThrottle(AnonRateThrottle):
+    scope = "registration"
 
 class TalaTokenObtainPairSerializer(TokenObtainPairSerializer):
     otp = serializers.CharField(required=False, allow_blank=True, write_only=True)
@@ -99,16 +104,15 @@ def registration_options(request):
             "label": str(item),
             "grade_level": item.grade_level,
             "cluster": item.cluster_id,
-            "adviser": item.adviser_id,
-            "adviser_name": (item.adviser.get_full_name() or item.adviser.email) if item.adviser else "To be assigned",
         }
-        for item in AcademicClass.objects.filter(is_active=True).select_related("adviser").order_by("grade_level", "name")
+        for item in AcademicClass.objects.filter(is_active=True).order_by("grade_level", "name")
     ]
     return Response({"clusters": clusters, "grade_levels": [11, 12], "sections": sections})
 
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@throttle_classes([RegistrationThrottle])
 def register_student(request):
     email = str(request.data.get("email", "")).strip().casefold()
     name = str(request.data.get("name", "")).strip()
@@ -131,9 +135,6 @@ def register_student(request):
         return Response({"detail": "Choose a valid cluster, grade level, and section."}, status=status.HTTP_400_BAD_REQUEST)
     if section.cluster_id and section.cluster_id != cluster.id:
         return Response({"section": "Choose a section available for the selected cluster."}, status=status.HTTP_400_BAD_REQUEST)
-    requested_adviser = request.data.get("adviser")
-    if requested_adviser and section.adviser_id and str(section.adviser_id) != str(requested_adviser):
-        return Response({"adviser": "The selected adviser does not match this section."}, status=status.HTTP_400_BAD_REQUEST)
     try:
         validate_password(password)
     except Exception as exc:
@@ -154,7 +155,7 @@ def register_student(request):
             academic_class=section,
             is_active=False,
         )
-        legacy_cluster = StudentProfile.Cluster.TECH_PRO if cluster.code == "TECH-VOC" else StudentProfile.Cluster.ACADEMICS
+        legacy_cluster = StudentProfile.Cluster.TECH_PRO if cluster.code == "TECH-PRO" else StudentProfile.Cluster.ACADEMICS
         StudentProfile.objects.create(profile=profile, grade_level=grade_level, cluster=legacy_cluster, cluster_record=cluster)
         AuditEvent.objects.create(actor=user, action="account.registration_requested", object_type="User", object_id=str(user.id), metadata={"cluster_id": cluster.id, "section_id": section.id})
         administrators = get_user_model().objects.filter(tala_profile__role=UserProfile.Role.ADMIN, tala_profile__is_active=True, is_active=True)
@@ -168,6 +169,42 @@ def register_student(request):
                 deduplication_key=f"registration:{user.id}:admin:{administrator.id}",
             )
     return Response({"detail": "Registration submitted. A school administrator must approve your account before you can sign in."}, status=status.HTTP_201_CREATED)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([RegistrationThrottle])
+def register_teacher(request):
+    email = str(request.data.get("email", "")).strip().casefold()
+    name = str(request.data.get("name", "")).strip()
+    password = str(request.data.get("password", ""))
+    try:
+        cluster_id = int(request.data.get("cluster"))
+    except (TypeError, ValueError):
+        return Response({"cluster": "Choose your teaching cluster."}, status=status.HTTP_400_BAD_REQUEST)
+    cluster = Cluster.objects.filter(pk=cluster_id, is_active=True).first()
+    if not email or "@" not in email:
+        return Response({"email": "Enter a valid email address."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(name.split()) < 2:
+        return Response({"name": "Enter your complete name."}, status=status.HTTP_400_BAD_REQUEST)
+    if not cluster:
+        return Response({"cluster": "Choose an active teaching cluster."}, status=status.HTTP_400_BAD_REQUEST)
+    if get_user_model().objects.filter(username__iexact=email).exists():
+        return Response({"email": "An account with this email already exists."}, status=status.HTTP_409_CONFLICT)
+    try:
+        validate_password(password)
+    except Exception as exc:
+        return Response({"password": list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+    first_name, last_name = name.split(maxsplit=1)
+    with transaction.atomic():
+        user = get_user_model().objects.create_user(username=email, email=email, password=password, first_name=first_name, last_name=last_name, is_active=True)
+        profile = UserProfile.objects.create(user=user, role=UserProfile.Role.TEACHER, is_active=False)
+        EmployeeProfile.objects.create(profile=profile, cluster=cluster, job_title="SHS Teacher")
+        AuditEvent.objects.create(actor=user, action="account.teacher_registration_requested", object_type="User", object_id=str(user.id), metadata={"cluster_id": cluster.id})
+        administrators = get_user_model().objects.filter(tala_profile__role=UserProfile.Role.ADMIN, tala_profile__is_active=True, is_active=True)
+        for administrator in administrators:
+            notify(recipient=administrator, kind=Notification.Kind.INTERVENTION, title="Teacher registration awaiting approval", message=f"{name} requested a teacher account for {cluster.name}.", action_url="/learners?view=teachers", deduplication_key=f"teacher-registration:{user.id}:admin:{administrator.id}")
+    return Response({"detail": "Teacher registration submitted. A school administrator must approve your account before you can sign in."}, status=status.HTTP_201_CREATED)
 
 
 def send_reset_email(user, request=None, onboarding=False):

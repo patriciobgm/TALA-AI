@@ -3,7 +3,7 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 from rest_framework_simplejwt.views import TokenRefreshView
-from recovery.auth_views import CurrentUserView, TalaTokenObtainPairView, begin_mfa_setup, change_password, confirm_mfa_setup, confirm_password_reset, disable_mfa, privacy_acknowledgment, profile, profile_avatar, register_student, registration_options, request_password_reset
+from recovery.auth_views import CurrentUserView, TalaTokenObtainPairView, begin_mfa_setup, change_password, confirm_mfa_setup, confirm_password_reset, disable_mfa, privacy_acknowledgment, profile, profile_avatar, register_student, register_teacher, registration_options, request_password_reset
 from recovery.views import remedial_consent_response
 from recovery.tutor_views import learner_support_insight
 
@@ -13,6 +13,7 @@ urlpatterns = [
     path("api/auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/auth/me/", CurrentUserView.as_view(), name="current_user"),
     path("api/auth/register/", register_student, name="student_registration"),
+    path("api/auth/register-teacher/", register_teacher, name="teacher_registration"),
     path("api/auth/registration-options/", registration_options, name="registration_options"),
     path("api/auth/password-reset/", request_password_reset),
     path("api/auth/password-reset/confirm/", confirm_password_reset),

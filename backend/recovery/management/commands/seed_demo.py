@@ -233,13 +233,15 @@ class Command(BaseCommand):
             EmployeeProfile.objects.update_or_create(profile=profile, defaults={"employee_id": f"EMP-2026-{index:03d}"})
 
         academic_cluster, _ = Cluster.objects.get_or_create(code="ACADEMIC", defaults={"name": "Academic"})
-        tech_voc_cluster, _ = Cluster.objects.get_or_create(code="TECH-VOC", defaults={"name": "Technical-Vocational (Tech-Voc)"})
+        tech_voc_cluster, _ = Cluster.objects.get_or_create(code="TECH-PRO", defaults={"name": "Technical Professional (Tech Pro)"})
+        Cluster.objects.filter(pk=tech_voc_cluster.pk).update(name="Technical Professional (Tech Pro)")
         for level in (11, 12):
             grade, _ = GradeLevel.objects.get_or_create(level=level, defaults={"name": f"Grade {level}"})
             AcademicClass.objects.filter(grade_level=level, grade_level_record__isnull=True).update(grade_level_record=grade)
         for details in StudentProfile.objects.select_related("profile__academic_class"):
             details.cluster_record = tech_voc_cluster if details.cluster == StudentProfile.Cluster.TECH_PRO else academic_cluster
             details.save(update_fields=["cluster_record"])
+        EmployeeProfile.objects.filter(profile__role=UserProfile.Role.TEACHER, cluster__isnull=True).update(cluster=academic_cluster)
         for current_subject in Subject.objects.all():
             current_subject.clusters.add(academic_cluster, tech_voc_cluster)
             topic, _ = Topic.objects.get_or_create(subject=current_subject, code=f"{current_subject.code}-CORE", defaults={"title": "Core competencies", "sequence_order": 1})
@@ -251,7 +253,15 @@ class Command(BaseCommand):
                 teacher_user = User.objects.filter(tala_profile__role=UserProfile.Role.TEACHER, tala_profile__assigned_subjects=current_subject, tala_profile__assigned_classes=section).order_by("id").first()
                 offering, _ = SubjectOffering.objects.update_or_create(subject=current_subject, academic_class=section, school_year=section.school_year, term="Full year", defaults={"teacher": teacher_user, "enrollment_code": f"{current_subject.code}-{section.class_code}", "is_active": True})
                 for learner_profile in UserProfile.objects.filter(role=UserProfile.Role.STUDENT, academic_class=section).select_related("user"):
-                    enrollment, _ = SubjectEnrollment.objects.get_or_create(student=learner_profile.user, offering=offering, status=SubjectEnrollment.Status.APPROVED, defaults={"source": SubjectEnrollment.Source.MIGRATION, "requested_by": learner_profile.user, "reviewed_by": teacher_user, "reviewed_at": timezone.now(), "decision_reason": "Seeded approved subject enrollment."})
+                    enrollment = SubjectEnrollment.objects.filter(student=learner_profile.user, offering=offering, status__in=[SubjectEnrollment.Status.PENDING, SubjectEnrollment.Status.APPROVED]).first()
+                    if enrollment:
+                        enrollment.status = SubjectEnrollment.Status.APPROVED
+                        enrollment.reviewed_by = teacher_user
+                        enrollment.reviewed_at = enrollment.reviewed_at or timezone.now()
+                        enrollment.decision_reason = enrollment.decision_reason or "Seeded approved subject enrollment."
+                        enrollment.save(update_fields=["status", "reviewed_by", "reviewed_at", "decision_reason"])
+                    else:
+                        enrollment = SubjectEnrollment.objects.create(student=learner_profile.user, offering=offering, status=SubjectEnrollment.Status.APPROVED, source=SubjectEnrollment.Source.MIGRATION, requested_by=learner_profile.user, reviewed_by=teacher_user, reviewed_at=timezone.now(), decision_reason="Seeded approved subject enrollment.")
                     initialize_enrollment_progression(enrollment)
                 for current_assessment in Assessment.objects.filter(subject=current_subject, assigned_classes=section):
                     current_assessment.subject_offerings.add(offering)

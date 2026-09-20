@@ -555,6 +555,7 @@ GET/POST /api/devices/
 
 GET      /api/tutor/health/
 POST     /api/tutor/plans/{plan}/messages/
+GET      /api/reports/academic-recovery/          Five scoped recovery reports
 ```
 
 All role-sensitive querysets and mutations are enforced by the backend; hiding a navigation item is not the security boundary.
@@ -567,16 +568,32 @@ source .venv/bin/activate
 python manage.py check
 python manage.py makemigrations --check
 python manage.py test
+python manage.py audit_academic_integrity
+python manage.py ai_evaluation_summary
+python manage.py check --deploy
 
 cd ../frontend
 npm run lint
 npm run build
+npm run test:e2e
 
 cd ../mobile
 npx tsc --noEmit
 npm run lint
 npx expo export --platform web
 ```
+
+`audit_academic_integrity --fix` applies only deterministic learner-cluster backfills; all other findings remain report-only for administrator review. `ai_evaluation_summary` reports observed usage and human-review coverage without presenting the reviewed sample as system-wide accuracy.
+
+Before running browser tests, start and seed the Docker stack:
+
+```bash
+docker compose up --build -d
+docker compose exec backend python manage.py seed_demo
+cd frontend && npm run test:e2e
+```
+
+Production release gates should include `docker compose config`, `python manage.py check --deploy`, backup/restore verification, unique secrets, HTTPS-only trusted origins, SMTP verification, the integrity audit, backend tests, frontend/mobile static checks, and the browser suite. Do not expose the llama.cpp port publicly; only the backend needs access to it.
 
 ## Project structure
 

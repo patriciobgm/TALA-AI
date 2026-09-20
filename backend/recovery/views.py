@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.mail import send_mail
 from django.db import connection
-from django.db.models import F, Max, Prefetch, Q
+from django.db.models import Avg, Count, F, Max, Prefetch, Q
 from django.core.files.storage import default_storage
 from django.http import FileResponse, HttpResponse, StreamingHttpResponse
 from django.db import transaction
@@ -709,6 +709,19 @@ class UserAdminViewSet(viewsets.ModelViewSet):
         AuditEvent.objects.create(actor=request.user, action="user.password_change_required", object_type="User", object_id=str(user.pk))
         return Response(self.get_serializer(user).data)
 
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        user = self.get_object()
+        if user.tala_profile.role not in {UserProfile.Role.STUDENT, UserProfile.Role.TEACHER}:
+            return Response({"detail": "Only learner and teacher registrations require approval."}, status=status.HTTP_400_BAD_REQUEST)
+        user.is_active = True
+        user.tala_profile.is_active = True
+        user.save(update_fields=["is_active"])
+        user.tala_profile.save(update_fields=["is_active"])
+        notify(recipient=user, kind=Notification.Kind.INTERVENTION, title="Account approved", message="Your TALA-AI account has been approved. You can now sign in.", action_url="/", deduplication_key=f"account-approved:{user.id}")
+        AuditEvent.objects.create(actor=request.user, action="user.approved", object_type="User", object_id=str(user.pk), metadata={"role": user.tala_profile.role})
+        return Response(self.get_serializer(user).data)
+
 class ResourceViewSet(viewsets.ModelViewSet):
     queryset = LearningResource.objects.prefetch_related("competencies", "practice_questions").all()
     serializer_class = ResourceSerializer
@@ -1108,6 +1121,7 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
                 messages=[{"role": "user", "content": prompt}], temperature=0.2, max_tokens=2400,
             ))
         except (LLMUnavailable, ValueError) as exc:
+            AuditEvent.objects.create(actor=request.user, action="ai.service_unavailable", object_type="Assessment", object_id=str(assessment.id), metadata={"operation": "generate_questions", "error_type": type(exc).__name__})
             return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         raw = generated.text.strip()
         if raw.startswith("```"):
@@ -1677,6 +1691,85 @@ def teacher_learners(request):
         gaps = gaps.count()
         rows.append({"id": student.id, "name": student.get_full_name() or student.username, "email": student.email, "section": str(student.tala_profile.academic_class) if student.tala_profile.academic_class else "Unassigned", "progress": round(completed_activities / total_activities * 100) if total_activities else 0, "gaps": gaps, "assessment": float(last_attempt.score) if last_attempt and last_attempt.score is not None else None, "status": "Intervention" if gaps >= 3 else "Monitor" if gaps else "On track"})
     return Response(rows)
+
+
+@api_view(["GET"])
+@permission_classes([IsTeacherOrAdmin])
+def academic_recovery_reports(request):
+    """Return the five operational academic-recovery reports from one scoped dataset."""
+    requested_subject = request.query_params.get("subject")
+    requested_class = request.query_params.get("class")
+    profile = request.user.tala_profile
+    subjects = Subject.objects.filter(is_active=True)
+    if role_for(request.user) == UserProfile.Role.TEACHER:
+        subjects = subjects.filter(pk__in=profile.assigned_subjects.values("pk"))
+    if requested_subject:
+        try:
+            requested_subject_id = int(requested_subject)
+        except (TypeError, ValueError):
+            return Response({"subject": "Choose a valid subject."}, status=status.HTTP_400_BAD_REQUEST)
+        if not subjects.filter(pk=requested_subject_id).exists():
+            return Response({"subject": "You are not authorized to report on this subject."}, status=status.HTTP_403_FORBIDDEN)
+        subjects = subjects.filter(pk=requested_subject_id)
+    subject_ids = list(subjects.values_list("id", flat=True))
+    enrollments = SubjectEnrollment.objects.filter(status=SubjectEnrollment.Status.APPROVED, offering__subject_id__in=subject_ids).select_related("student__tala_profile__academic_class", "offering__subject", "offering__academic_class")
+    if role_for(request.user) == UserProfile.Role.TEACHER:
+        enrollments = enrollments.filter(Q(offering__teacher=request.user) | Q(offering__academic_class__in=profile.assigned_classes.all())).distinct()
+    if requested_class:
+        try:
+            requested_class_id = int(requested_class)
+        except (TypeError, ValueError):
+            return Response({"class": "Choose a valid class."}, status=status.HTTP_400_BAD_REQUEST)
+        if role_for(request.user) == UserProfile.Role.TEACHER and not profile.assigned_classes.filter(pk=requested_class_id).exists():
+            return Response({"class": "You are not authorized to report on this class."}, status=status.HTTP_403_FORBIDDEN)
+        enrollments = enrollments.filter(offering__academic_class_id=requested_class_id)
+    enrollment_pairs = list(enrollments.values_list("student_id", "offering__subject_id"))
+    student_ids = sorted({student_id for student_id, _ in enrollment_pairs})
+    scoped_subject_ids = sorted({subject_id for _, subject_id in enrollment_pairs})
+    attempts = AssessmentAttempt.objects.filter(student_id__in=student_ids, assessment__subject_id__in=scoped_subject_ids, submitted_at__isnull=False).select_related("student__tala_profile__academic_class", "assessment__subject")
+    gaps = LearningGap.objects.filter(student_id__in=student_ids, competency__subject_id__in=scoped_subject_ids).select_related("student__tala_profile__academic_class", "competency__subject")
+    plans = RecoveryPlan.objects.filter(student_id__in=student_ids, competency__subject_id__in=scoped_subject_ids).select_related("student", "competency__subject").prefetch_related("activities")
+    interventions = Intervention.objects.filter(student_id__in=student_ids).filter(Q(competency__subject_id__in=scoped_subject_ids) | Q(offering__subject_id__in=scoped_subject_ids) | Q(assessment__subject_id__in=scoped_subject_ids)).select_related("student__tala_profile__academic_class", "teacher", "competency__subject", "offering__subject", "resource", "assessment")
+    learners = []
+    for student_id in student_ids:
+        student_enrollments = [item for item in enrollments if item.student_id == student_id]
+        student = student_enrollments[0].student
+        student_attempts = [item for item in attempts if item.student_id == student_id]
+        student_gaps = [item for item in gaps if item.student_id == student_id]
+        student_plans = [item for item in plans if item.student_id == student_id]
+        activities = [activity for plan in student_plans for activity in plan.activities.all()]
+        baseline = min(student_attempts, key=lambda item: item.submitted_at).score if student_attempts else None
+        latest = max(student_attempts, key=lambda item: item.submitted_at).score if student_attempts else None
+        learners.append({
+            "student_id": student.id,
+            "learner": student.get_full_name() or student.username,
+            "section": str(student.tala_profile.academic_class) if student.tala_profile.academic_class else "Unassigned",
+            "subjects": sorted({item.offering.subject.name for item in student_enrollments}),
+            "baseline_score": float(baseline) if baseline is not None else None,
+            "latest_score": float(latest) if latest is not None else None,
+            "active_gaps": sum(item.status != LearningGap.Status.RESOLVED for item in student_gaps),
+            "resolved_gaps": sum(item.status == LearningGap.Status.RESOLVED for item in student_gaps),
+            "completed_activities": sum(activity.completed_at is not None for activity in activities),
+            "total_activities": len(activities),
+        })
+    class_subject = []
+    grouped_enrollments = enrollments.values("offering__subject_id", "offering__subject__name", "offering__academic_class_id", "offering__academic_class__name", "offering__academic_class__grade_level").annotate(learners=Count("student_id", distinct=True)).order_by("offering__subject__name", "offering__academic_class__grade_level", "offering__academic_class__name")
+    for group in grouped_enrollments:
+        group_student_ids = enrollments.filter(offering__subject_id=group["offering__subject_id"], offering__academic_class_id=group["offering__academic_class_id"]).values_list("student_id", flat=True)
+        score = attempts.filter(student_id__in=group_student_ids, assessment__subject_id=group["offering__subject_id"]).aggregate(value=Avg("score"))["value"]
+        class_subject.append({"subject_id": group["offering__subject_id"], "subject": group["offering__subject__name"], "class_id": group["offering__academic_class_id"], "section": f"Grade {group['offering__academic_class__grade_level']} – {group['offering__academic_class__name']}", "learners": group["learners"], "average_score": round(float(score), 2) if score is not None else None, "active_gaps": gaps.filter(student_id__in=group_student_ids, competency__subject_id=group["offering__subject_id"], status__in=[LearningGap.Status.OPEN, LearningGap.Status.MONITORING]).count()})
+    assessment_rows = [{"attempt_id": item.id, "learner": item.student.get_full_name() or item.student.username, "section": str(item.student.tala_profile.academic_class) if item.student.tala_profile.academic_class else "Unassigned", "subject": item.assessment.subject.name, "assessment": item.assessment.title, "type": item.assessment.get_kind_display(), "score": float(item.score) if item.score is not None else None, "grading_status": item.get_grading_status_display(), "submitted_at": item.submitted_at} for item in attempts.order_by("-submitted_at")]
+    gap_rows = [{"gap_id": item.id, "learner": item.student.get_full_name() or item.student.username, "section": str(item.student.tala_profile.academic_class) if item.student.tala_profile.academic_class else "Unassigned", "subject": item.competency.subject.name, "competency": item.competency.title, "score": float(item.current_score), "classification": item.get_classification_display(), "priority": item.get_priority_display(), "status": item.get_status_display(), "identified_at": item.identified_at} for item in gaps.order_by("status", "-identified_at")]
+    intervention_rows = [{"intervention_id": item.id, "learner": item.student.get_full_name() or item.student.username, "section": str(item.student.tala_profile.academic_class) if item.student.tala_profile.academic_class else "Unassigned", "subject": item.competency.subject.name if item.competency else (item.offering.subject.name if item.offering else "—"), "competency": item.competency.title if item.competency else "—", "action": item.action.replace("_", " ").title(), "status": item.get_status_display(), "teacher": item.teacher.get_full_name() or item.teacher.username, "follow_up_at": item.follow_up_at, "created_at": item.created_at} for item in interventions.order_by("-created_at")]
+    return Response({
+        "generated_at": timezone.now(),
+        "filters": {"subject": int(requested_subject) if requested_subject else None, "class": int(requested_class) if requested_class else None},
+        "learner_recovery": learners,
+        "class_subject_recovery": class_subject,
+        "assessment_performance": assessment_rows,
+        "learning_gaps": gap_rows,
+        "interventions": intervention_rows,
+    })
 
 @api_view(["GET"])
 @permission_classes([IsTeacher])

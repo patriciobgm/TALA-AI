@@ -34,6 +34,7 @@ import { PageHeader } from "../components/PageHeader";
 import { StatusChip } from "../components/StatusChip";
 import { downloadText } from "../utils/download";
 import { useTeachingScope } from "../components/TeachingScopeContext";
+import { AcademicRecoveryReports } from "../components/AcademicRecoveryReports";
 
 type MaterialRow = MaterialAnalytics["learners"][number];
 type LearnerMaterialGroup = {
@@ -340,6 +341,7 @@ export function TeacherReportsPage() {
       </Card>
       {section === "recovery" ? (
         <>
+          {scope?.selectedSubjectId && <AcademicRecoveryReports subjectId={scope.selectedSubjectId} />}
           <Card sx={{ mb: 3, p: 2.5 }}>
             <Box
               sx={{
