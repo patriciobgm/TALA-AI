@@ -12,7 +12,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from .llm.base import LLMUnavailable
 from .llm.base import LLMRequest
-from .models import AICompanionSession, AIConversation, AIHelpRequest, AIMessage, AIMessageFeedback, AdaptiveLearningState, Assessment, AssessmentAttempt, AuditEvent, Competency, ContentImport, LearnerCompetencyEvidence, LearnerMisconception, LearningAssignment, LearningAssignmentProgress, LearningGoal, Misconception, PracticeQuestion, Question, RecoveryPlan, UserProfile
+from .models import AICompanionSession, AIConversation, AIHelpRequest, AIMessage, AIMessageFeedback, AIRecommendation, AdaptiveLearningState, Assessment, AssessmentAttempt, AuditEvent, Competency, ContentImport, LearnerCompetencyEvidence, LearnerMisconception, LearningAssignment, LearningAssignmentProgress, LearningGoal, Misconception, PracticeQuestion, Question, RecoveryPlan, SubjectEnrollment, UserProfile
 from .permissions import IsStudent, role_for
 from .tutor import answer_learning_assignment, answer_student
 from .llm.factory import get_llm_provider
@@ -55,15 +55,16 @@ def learner_support_insight(request, student_id):
     student = get_user_model().objects.filter(pk=student_id, tala_profile__role=UserProfile.Role.STUDENT).select_related("tala_profile__academic_class").first()
     if not student:
         return Response({"detail": "Learner not found."}, status=status.HTTP_404_NOT_FOUND)
-    if role_for(request.user) == UserProfile.Role.TEACHER and not request.user.tala_profile.assigned_classes.filter(pk=student.tala_profile.academic_class_id).exists():
-        return Response({"detail": "You are not assigned to this learner's class."}, status=status.HTTP_403_FORBIDDEN)
+    teacher_enrollments = SubjectEnrollment.objects.filter(student=student, status=SubjectEnrollment.Status.APPROVED, offering__teacher=request.user) if role_for(request.user) == UserProfile.Role.TEACHER else SubjectEnrollment.objects.none()
+    if role_for(request.user) == UserProfile.Role.TEACHER and not teacher_enrollments.exists():
+        return Response({"detail": "This learner is not enrolled in one of your subject offerings."}, status=status.HTTP_403_FORBIDDEN)
     evidence_query = LearnerCompetencyEvidence.objects.filter(student=student).select_related("competency")
     plan_query = RecoveryPlan.objects.filter(student=student, status="active").select_related("competency").prefetch_related("activities")
     if role_for(request.user) == UserProfile.Role.TEACHER:
-        subject_ids = request.user.tala_profile.assigned_subjects.values_list("id", flat=True)
+        subject_ids = teacher_enrollments.values_list("offering__subject_id", flat=True).distinct()
         requested_subject_id = request.query_params.get("subject")
         if requested_subject_id:
-            if not request.user.tala_profile.assigned_subjects.filter(pk=requested_subject_id).exists():
+            if not teacher_enrollments.filter(offering__subject_id=requested_subject_id).exists():
                 return Response({"subject": "You are not assigned to this subject."}, status=status.HTTP_403_FORBIDDEN)
             subject_ids = [requested_subject_id]
         evidence_query = evidence_query.filter(competency__subject_id__in=subject_ids)
@@ -81,8 +82,21 @@ def learner_support_insight(request, student_id):
         response = get_llm_provider().generate(LLMRequest(system=system, messages=[{"role": "user", "content": prompt}], temperature=0.1, max_tokens=450))
     except LLMUnavailable as exc:
         return Response({"detail": str(exc), "code": "llm_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    AuditEvent.objects.create(actor=request.user, action="ai.learner_support_insight_generated", object_type="User", object_id=str(student.id), metadata={"evidence_count": len(evidence), "active_plan_count": len(plans), "provider": response.provider, "model": response.model})
-    return Response({"insight": response.text, "recommended_action": recommended_action, "recommended_note": recommended_note, "priority_competency": priority_plan.competency.title if priority_plan else "", "provider": response.provider, "model": response.model, "evidence_count": len(evidence), "generated_at": timezone.now()})
+    offering = priority_plan.offering if priority_plan else SubjectEnrollment.objects.filter(student=student, status="approved", offering__teacher=request.user).select_related("offering").first()
+    offering = offering.offering if hasattr(offering, "offering") else offering
+    recommendation = AIRecommendation.objects.create(
+        student=student,
+        offering=offering,
+        competency=priority_plan.competency if priority_plan else None,
+        learning_gap=priority_plan.learning_gap if priority_plan else None,
+        recommendation=response.text,
+        rationale=recommended_note,
+        evidence_snapshot={"evidence": evidence_lines, "plans": plan_lines, "evidence_count": len(evidence), "active_plan_count": len(plans)},
+        provider=response.provider,
+        model=response.model,
+    )
+    AuditEvent.objects.create(actor=request.user, action="ai.learner_support_insight_generated", object_type="AIRecommendation", object_id=str(recommendation.id), metadata={"student_id": student.id, "evidence_count": len(evidence), "active_plan_count": len(plans), "provider": response.provider, "model": response.model})
+    return Response({"recommendation_id": recommendation.id, "insight": response.text, "recommended_action": recommended_action, "recommended_note": recommended_note, "priority_competency": priority_plan.competency.title if priority_plan else "", "provider": response.provider, "model": response.model, "evidence_count": len(evidence), "generated_at": timezone.now()})
 
 @api_view(["GET", "POST"])
 @permission_classes([IsStudent])

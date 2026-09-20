@@ -1,10 +1,18 @@
 from rest_framework.routers import DefaultRouter
 from django.urls import path
-from .views import AcademicClassViewSet, AssessmentViewSet, CompetencyViewSet, ContentImportViewSet, DeviceRegistrationViewSet, EnrollmentRequestViewSet, InterventionViewSet, LearningAssignmentViewSet, NotificationViewSet, RecoveryPlanViewSet, ResourceViewSet, SubjectViewSet, UserAdminViewSet, admin_overview, ai_message_evaluations, audit_events, health, notification_preferences, privacy_requests, research_evidence, research_snapshots, student_context, student_dashboard, system_configuration, teacher_context, teacher_learners, teacher_learner_detail, teacher_learner_recommendations, teacher_material_analytics, usability_evaluations
+from .views import AIRecommendationViewSet, AcademicClassViewSet, AssessmentViewSet, ClusterViewSet, CompetencyViewSet, ContentImportViewSet, DeviceRegistrationViewSet, EnrollmentRequestViewSet, GradeLevelViewSet, InterventionViewSet, LearnerCompetencyStateViewSet, LearningAssignmentViewSet, LearningGapViewSet, NotificationViewSet, RecoveryPlanViewSet, ResourceViewSet, SubjectEnrollmentViewSet, SubjectOfferingViewSet, SubjectViewSet, TopicViewSet, UserAdminViewSet, admin_overview, ai_message_evaluations, audit_events, health, notification_preferences, privacy_requests, research_evidence, research_snapshots, student_context, student_dashboard, system_configuration, teacher_context, teacher_learners, teacher_learner_detail, teacher_learner_recommendations, teacher_material_analytics, usability_evaluations
 from .tutor_views import assessment_recovery_evidence, companion_analytics, companion_dashboard, companion_help_request, learning_assignment_tutor_message, learning_goal_detail, learning_goals, misconception_detail, misconception_signals, misconceptions, start_companion_session, tutor_feedback, tutor_health, tutor_message, update_companion_session
 
 router = DefaultRouter()
 router.register("subjects", SubjectViewSet)
+router.register("clusters", ClusterViewSet)
+router.register("grade-levels", GradeLevelViewSet)
+router.register("topics", TopicViewSet, basename="topic")
+router.register("subject-offerings", SubjectOfferingViewSet, basename="subject-offering")
+router.register("subject-enrollments", SubjectEnrollmentViewSet, basename="subject-enrollment")
+router.register("learning-gaps", LearningGapViewSet, basename="learning-gap")
+router.register("competency-states", LearnerCompetencyStateViewSet, basename="competency-state")
+router.register("ai-recommendations", AIRecommendationViewSet, basename="ai-recommendation")
 router.register("classes", AcademicClassViewSet, basename="class")
 router.register("users", UserAdminViewSet, basename="user")
 router.register("competencies", CompetencyViewSet)

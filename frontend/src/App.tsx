@@ -15,7 +15,7 @@ const RecoveryWorkspace = lazy(() => import('./pages/RecoveryWorkspace').then(mo
 const LearnerProfile = lazy(() => import('./pages/LearnerProfile').then(module => ({ default: module.LearnerProfile })));
 const AdminOverview = lazy(() => import('./pages/AdminOverview').then(module => ({ default: module.AdminOverview })));
 const AdminUsers = lazy(() => import('./pages/AdminUsers').then(module => ({ default: module.AdminUsers })));
-const SubjectsPage = lazy(() => import('./pages/CurriculumPages').then(module => ({ default: module.SubjectsPage })));
+const SubjectsPage = lazy(() => import('./pages/AdminCurriculumSetupPage').then(module => ({ default: module.AdminCurriculumSetupPage })));
 const CompetenciesPage = lazy(() => import('./pages/CurriculumPages').then(module => ({ default: module.CompetenciesPage })));
 const ResearchEvidencePage = lazy(() => import('./pages/ResearchEvidencePage').then(module => ({ default: module.ResearchEvidencePage })));
 const AssessmentsPage = lazy(() => import('./pages/AssessmentManagementPage').then(module => ({ default: module.AssessmentManagementPage })));

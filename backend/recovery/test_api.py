@@ -19,8 +19,9 @@ from .account_security import _totp
 from .content_imports import _extract_pdf, generate_grounded_practice_questions, parse_module_questions
 from .learning_intelligence import rank_learning_resources
 from .llm.base import LLMResponse
-from .models import AICompanionSession, AIHelpRequest, AIMessage, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Competency, CompetencyResult, ContentImport, EnrollmentRequest, LearnerCompetencyEvidence, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, UserProfile
+from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, UserProfile
 from .services import create_recovery_plan
+from .progression_engine import apply_competency_result
 from .companion_intelligence import record_question_outcome
 from .tasks import generate_inactivity_reminders
 
@@ -207,7 +208,7 @@ References
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["cluster"], "academics")
         self.assertEqual(response.data["assignments"][0], "Grade 11 – Rizal")
-        self.assertEqual(response.data["assignments"][1], "Cluster · Academics")
+        self.assertEqual(response.data["assignments"][1], "Cluster · Academic")
 
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_new_student_gets_onboarding_email_and_must_change_password(self):
@@ -835,12 +836,12 @@ References
         self.assertEqual(question.prompt, "Revised teacher question")
 
     def test_teacher_learner_detail_is_limited_to_assigned_subjects(self):
-        teacher = get_user_model().objects.get(username="liza.navarro@tala.edu.ph")
-        student = get_user_model().objects.filter(tala_profile__academic_class__in=teacher.tala_profile.assigned_classes.all(), tala_profile__role=UserProfile.Role.STUDENT).first()
+        teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
+        student = get_user_model().objects.filter(subject_enrollments__offering__teacher=teacher, subject_enrollments__status=SubjectEnrollment.Status.APPROVED, tala_profile__role=UserProfile.Role.STUDENT).distinct().first()
         unauthorized_competency = Competency.objects.exclude(subject__in=teacher.tala_profile.assigned_subjects.all()).first()
         LearnerCompetencyEvidence.objects.create(student=student, competency=unauthorized_competency, evidence_type=LearnerCompetencyEvidence.EvidenceType.PRACTICE, source_type="test", source_id=999, summary="Evidence outside the teacher's subject scope.")
 
-        self.authenticate("liza.navarro@tala.edu.ph")
+        self.authenticate("teacher@tala.edu.ph")
         response = self.client.get(f"/api/dashboard/teacher/learners/{student.id}/")
 
         self.assertEqual(response.status_code, 200, response.data)
@@ -1171,6 +1172,7 @@ References
             assignment.resource.refresh_from_db()
             self.assertFalse(assignment.resource.practice_questions.exists())
 
+    @override_settings(WHISPER_ENABLED=False)
     def test_teacher_can_publish_video_learning_material(self):
         self.authenticate("teacher@tala.edu.ph")
         from .models import Competency, Subject
@@ -1345,3 +1347,103 @@ Answer: B
         marked = self.client.post(f"/api/notifications/{notification_id}/read/")
         self.assertEqual(marked.status_code, 200)
         self.assertTrue(marked.data["is_read"])
+
+    def test_learner_registration_is_cluster_scoped_and_requires_admin_approval(self):
+        options = self.client.get("/api/auth/registration-options/")
+        self.assertEqual(options.status_code, 200, options.data)
+        cluster = options.data["clusters"][0]
+        section = next(item for item in options.data["sections"] if not item["cluster"] or item["cluster"] == cluster["id"])
+        email = "pending.learner@example.edu.ph"
+
+        created = self.client.post("/api/auth/register/", {
+            "email": email,
+            "password": "A-Strong-Password-2026!",
+            "name": "Pending Learner",
+            "cluster": cluster["id"],
+            "grade_level": section["grade_level"],
+            "section": section["id"],
+            "adviser": section["adviser"],
+        }, format="json")
+
+        self.assertEqual(created.status_code, 201, created.data)
+        user = get_user_model().objects.get(username=email)
+        self.assertFalse(user.tala_profile.is_active)
+        self.assertEqual(user.tala_profile.student_details.cluster_record_id, cluster["id"])
+        denied = self.client.post("/api/auth/login/", {"username": email, "password": "A-Strong-Password-2026!"}, format="json")
+        self.assertEqual(denied.status_code, 400)
+        self.assertTrue(Notification.objects.filter(title="Learner registration awaiting review", recipient__tala_profile__role=UserProfile.Role.ADMIN).exists())
+
+    def test_subject_enrollment_prevents_duplicate_current_record(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        enrollment = SubjectEnrollment.objects.filter(student=student, status=SubjectEnrollment.Status.APPROVED).first()
+        self.authenticate("student@tala.edu.ph")
+
+        duplicate = self.client.post("/api/subject-enrollments/", {"offering": enrollment.offering_id}, format="json")
+
+        self.assertEqual(duplicate.status_code, 409, duplicate.data)
+        self.assertEqual(SubjectEnrollment.objects.filter(student=student, offering=enrollment.offering, status__in=["pending", "approved"]).count(), 1)
+
+    def test_available_subjects_respect_persisted_cluster(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        details = student.tala_profile.student_details
+        other_cluster = Cluster.objects.exclude(pk=details.cluster_record_id).first()
+        subject = Subject.objects.create(name="Cluster Restricted Subject", code="CRS", grade_level=details.grade_level)
+        subject.clusters.add(other_cluster)
+        offering = SubjectOffering.objects.create(subject=subject, academic_class=student.tala_profile.academic_class, school_year="2026-2027", term="Full year")
+        self.authenticate("student@tala.edu.ph")
+
+        available = self.client.get("/api/subject-offerings/available/")
+
+        self.assertEqual(available.status_code, 200, available.data)
+        self.assertNotIn(offering.id, {item["id"] for item in available.data})
+
+    def test_backend_blocks_direct_access_to_locked_competency(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        locked = LearnerCompetencyState.objects.filter(student=student, status=LearnerCompetencyState.Status.LOCKED).select_related("offering__subject", "competency").first()
+        self.assertIsNotNone(locked)
+        assessment = Assessment.objects.create(title="Locked competency bypass test", subject=locked.offering.subject, kind=Assessment.Kind.POST, created_by=get_user_model().objects.get(username="admin@tala.edu.ph"), is_active=True)
+        assessment.subject_offerings.add(locked.offering)
+        assessment.assigned_classes.add(locked.offering.academic_class)
+        Question.objects.create(assessment=assessment, competency=locked.competency, prompt="Locked question", question_type=Question.QuestionType.TRUE_FALSE, options=["True", "False"], correct_answer="True")
+        self.authenticate("student@tala.edu.ph")
+
+        blocked = self.client.get(f"/api/assessments/{assessment.id}/start/?competency={locked.competency_id}")
+
+        self.assertEqual(blocked.status_code, 409, blocked.data)
+        self.assertIn("earlier competency", blocked.data["detail"])
+
+    def test_mastery_result_unlocks_the_next_competency(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        next_state = LearnerCompetencyState.objects.filter(student=student, status=LearnerCompetencyState.Status.LOCKED).select_related("offering", "competency").first()
+        prerequisite_state = LearnerCompetencyState.objects.filter(student=student, offering=next_state.offering, competency__sequence_order__lt=next_state.competency.sequence_order).exclude(status=LearnerCompetencyState.Status.MASTERED).select_related("competency").order_by("-competency__sequence_order").first()
+        assessment = Assessment.objects.create(title="Progression unlock test", kind=Assessment.Kind.POST, subject=next_state.offering.subject, created_by=get_user_model().objects.get(username="admin@tala.edu.ph"), is_active=True)
+        assessment.subject_offerings.add(next_state.offering)
+        assessment.assigned_classes.add(next_state.offering.academic_class)
+        attempt = AssessmentAttempt.objects.create(assessment=assessment, student=student, submitted_at=timezone.now(), score=100)
+        result = CompetencyResult.objects.create(attempt=attempt, competency=prerequisite_state.competency, score=100, status=CompetencyResult.Status.MASTERED)
+
+        apply_competency_result(student, result, next_state.offering)
+
+        next_state.refresh_from_db()
+        self.assertEqual(next_state.status, LearnerCompetencyState.Status.AVAILABLE)
+
+    def test_assigned_teacher_only_can_manage_offering_candidates(self):
+        offering = SubjectOffering.objects.filter(teacher__username="teacher@tala.edu.ph").first()
+        self.authenticate("ramon.mendoza@tala.edu.ph")
+
+        response = self.client.get(f"/api/subject-enrollments/candidates/?offering={offering.id}")
+
+        self.assertEqual(response.status_code, 403, response.data)
+
+    def test_teacher_decision_on_ai_recommendation_is_persisted(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        offering = SubjectOffering.objects.filter(teacher__username="teacher@tala.edu.ph", enrollments__student=student).first()
+        recommendation = AIRecommendation.objects.create(student=student, offering=offering, recommendation="Assign focused guided practice.", rationale="A repeated gap is recorded.", evidence_snapshot={"evidence_count": 2})
+        self.authenticate("teacher@tala.edu.ph")
+
+        reviewed = self.client.post(f"/api/ai-recommendations/{recommendation.id}/review/", {"status": "modified", "teacher_response": "Use a worked example before guided practice."}, format="json")
+
+        self.assertEqual(reviewed.status_code, 200, reviewed.data)
+        recommendation.refresh_from_db()
+        self.assertEqual(recommendation.status, AIRecommendation.Status.MODIFIED)
+        self.assertEqual(recommendation.reviewed_by.username, "teacher@tala.edu.ph")

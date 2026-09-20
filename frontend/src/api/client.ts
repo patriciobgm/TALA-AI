@@ -34,10 +34,11 @@ async function refreshAccess() {
 function errorMessage(data: unknown, status: number) {
   if (typeof data === 'object' && data) {
     if ('detail' in data) return String((data as { detail: unknown }).detail);
-    for (const [field, value] of Object.entries(data)) {
-      const message = Array.isArray(value) ? value[0] : value;
-      if (typeof message === 'string') return `${field.replaceAll('_', ' ')}: ${message}`;
-    }
+    const messages = Object.entries(data).flatMap(([field, value]) => {
+      const values = Array.isArray(value) ? value : [value];
+      return values.filter((message): message is string => typeof message === 'string').map(message => `${field.replaceAll('_', ' ')}: ${message}`);
+    });
+    if (messages.length) return messages.join(' ');
   }
   return status >= 500 ? 'The server encountered an error. Try again or check the backend log.' : 'The request could not be completed.';
 }

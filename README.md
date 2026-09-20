@@ -31,6 +31,27 @@ The LLM is an optional tutor. Assessment scoring, mastery, progression, deadline
 - Expo/React Native student application
 - PostgreSQL, Redis, Celery, Gunicorn, and Nginx Docker deployment baseline
 
+## Academic recovery domain
+
+The persisted learning hierarchy is `Cluster → Subject Offering → Topic → Competency → Resource / Assessment`. A subject offering binds one subject to one section, teacher, school year, and term and owns its enrollment code. Learners request enrollment in an offering; the assigned teacher approves it, while an administrator can override with a recorded reason.
+
+Diagnostic scoring remains deterministic. Each competency result updates a persistent learning gap and learner-competency state. Mastery closes the gap and unlocks the next eligible competency; results below mastery keep later competencies locked at the API layer and create or update the learner's recovery plan. AI can explain, recommend, and summarize evidence, but cannot score objective questions, enroll learners, mark completion, or change progression.
+
+Teacher-facing AI recommendations retain their evidence snapshot and remain pending until a teacher accepts, modifies, overrides, or ignores them. Intervention and recommendation history provide the audit trail used by learner reports and the printable Learning Support Record.
+
+### Existing installation upgrade
+
+The academic-domain migration is data-preserving. It creates the two initial clusters, grade records, ordered topics, subject offerings, approved enrollment records for existing assignments, learning gaps, and learner competency states. Back up the database before production deployment, then run:
+
+```bash
+cd backend
+source .venv/bin/activate
+python manage.py migrate
+python manage.py check
+```
+
+After migration, an administrator should review **Subjects → Clusters**, **Subjects → Subject Offerings**, section advisers, and the Developing/Mastery thresholds in **System Settings → Academic Defaults** before opening enrollment.
+
 ## Technology
 
 | Area | Stack |

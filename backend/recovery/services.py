@@ -2,12 +2,9 @@ from collections import defaultdict
 from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
-from .models import CompetencyResult, Notification, RecoveryActivity, RecoveryPlan
+from .models import CompetencyResult, LearningGap, Notification, RecoveryActivity, RecoveryPlan, SystemConfiguration
 from .learning_intelligence import rank_learning_resources
 from .notifications import notify
-
-DEVELOPING_THRESHOLD = 50
-
 
 def sync_recovery_activity_completion(student, assignment, completed_at):
     """Reuse material completion recorded after the diagnostic that created a plan."""
@@ -28,16 +25,17 @@ def sync_recovery_activity_completion(student, assignment, completed_at):
         RecoveryActivity.objects.filter(id__in=completed_ids).update(completed_at=completed_at)
     return len(completed_ids)
 
-def classify_mastery(score: float, mastery_threshold: int = 75) -> str:
+def classify_mastery(score: float, mastery_threshold: int = 75, developing_threshold: int = 50) -> str:
     """Deterministic classification used by scoring and plan generation."""
     if score >= mastery_threshold:
         return CompetencyResult.Status.MASTERED
-    if score >= DEVELOPING_THRESHOLD:
+    if score >= developing_threshold:
         return CompetencyResult.Status.DEVELOPING
     return CompetencyResult.Status.REMEDIATION
 
 @transaction.atomic
 def calculate_competency_results(attempt):
+    developing_threshold = SystemConfiguration.load().developing_threshold
     grouped = defaultdict(list)
     for answer in attempt.answers.select_related("question__competency"):
         answer_score = answer.score
@@ -51,13 +49,21 @@ def calculate_competency_results(attempt):
         score = round(sum(answers) / len(answers), 2)
         result, _ = CompetencyResult.objects.update_or_create(
             attempt=attempt, competency=competency,
-            defaults={"score": score, "status": classify_mastery(score, competency.mastery_threshold)},
+            defaults={"score": score, "status": classify_mastery(score, competency.mastery_threshold, developing_threshold)},
         )
         results.append(result)
     return results
 
 @transaction.atomic
 def create_recovery_plan(student, result, *, support_level="full"):
+    from .progression_engine import approved_offering_for
+
+    offering = approved_offering_for(student, result.competency.subject, result.attempt.assessment)
+    learning_gap = LearningGap.objects.filter(
+        student=student,
+        competency=result.competency,
+        status__in=[LearningGap.Status.OPEN, LearningGap.Status.MONITORING],
+    ).first()
     latest_result = (
         CompetencyResult.objects.filter(
             attempt__student=student,
@@ -101,8 +107,17 @@ def create_recovery_plan(student, result, *, support_level="full"):
 
     plan, created = RecoveryPlan.objects.get_or_create(
         student=student, competency=result.competency, status="active",
-        defaults={"baseline_score": result.score, "trigger_status": result.status, "trigger_attempt": result.attempt},
+        defaults={"baseline_score": result.score, "trigger_status": result.status, "trigger_attempt": result.attempt, "offering": offering, "learning_gap": learning_gap},
     )
+    changed_fields = []
+    if offering and not plan.offering_id:
+        plan.offering = offering
+        changed_fields.append("offering")
+    if learning_gap and plan.learning_gap_id != learning_gap.id:
+        plan.learning_gap = learning_gap
+        changed_fields.append("learning_gap")
+    if changed_fields:
+        plan.save(update_fields=changed_fields)
     if created:
         recommendation_limit = 2 if support_level == "guided" else 3
         recommendations = rank_learning_resources(student, result.competency, limit=recommendation_limit)

@@ -15,16 +15,22 @@ type MultiSelectFieldProps = {
   placeholder?: string;
   disabled?: boolean;
   required?: boolean;
+  loading?: boolean;
+  noOptionsText?: string;
 };
 
-export function MultiSelectField({ label, options, value, onChange, helperText, placeholder, disabled = false, required = false }: MultiSelectFieldProps) {
+export function MultiSelectField({ label, options, value, onChange, helperText, placeholder, disabled = false, required = false, loading = false, noOptionsText = 'No matching options' }: MultiSelectFieldProps) {
   const selected = options.filter(option => value.includes(option.id));
   const selectionHelp = selected.length ? `${selected.length} selected${helperText ? ` · ${helperText}` : ''}` : helperText;
 
   return <Autocomplete
     multiple
     disableCloseOnSelect
+    openOnFocus
     disabled={disabled}
+    loading={loading}
+    loadingText="Loading options…"
+    noOptionsText={noOptionsText}
     options={options}
     value={selected}
     isOptionEqualToValue={(option, current) => option.id === current.id}
@@ -38,7 +44,7 @@ export function MultiSelectField({ label, options, value, onChange, helperText, 
       <Checkbox checked={state.selected} size="small" sx={{ p: .25, mt: .1 }} />
       <Box sx={{ minWidth: 0 }}><Typography variant="body2" fontWeight={650}>{option.label}</Typography>{option.detail && <Typography variant="caption" color="text.secondary">{option.detail}</Typography>}</Box>
     </Box>}
-    renderInput={params => <TextField {...params} label={label} required={required} helperText={selectionHelp} placeholder={selected.length ? '' : placeholder ?? `Search and select ${label.toLowerCase()}`} />}
+    renderInput={params => <TextField {...params} label={label} required={required && selected.length === 0} helperText={selectionHelp} placeholder={selected.length ? '' : placeholder ?? `Search and select ${label.toLowerCase()}`} />}
     slotProps={{ paper: { sx: { mt: .5 } }, listbox: { sx: { maxHeight: 320 } } }}
     sx={{ '& .MuiAutocomplete-inputRoot': { alignItems: 'center', minHeight: 56 } }}
   />;

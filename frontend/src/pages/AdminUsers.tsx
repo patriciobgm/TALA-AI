@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel, MenuItem, Stack, Tab, Tabs, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from '@mui/material';
 import { Add, EditOutlined } from '@mui/icons-material';
 import { api } from '../api/client';
-import type { ApiClass, ApiSubject } from '../api/types';
+import type { ApiClass, ApiCluster, ApiSubject } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
 import { StatusChip } from '../components/StatusChip';
 import { DataTablePagination, DataTableToolbar, SortableTableCell, useServerTable } from '../components/DataTable';
@@ -12,14 +12,14 @@ import { useUrlView } from '../utils/useUrlView';
 
 type ManagedUser = {
   id: number; name: string; email: string; role: 'student' | 'teacher' | 'admin';
-  is_superadmin: boolean; grade_level: number | null; cluster: 'academics' | 'tech_pro' | ''; section: string;
+  is_superadmin: boolean; grade_level: number | null; cluster: 'academics' | 'tech_pro' | ''; cluster_record: number | null; cluster_name: string; section: string;
   academic_class: number | null; assigned_classes: number[]; assigned_subjects: number[];
   assignment: string; status: string; is_active: boolean; mfa_enabled: boolean; must_change_password: boolean;
   date_of_birth: string | null; gender: string; phone: string; student_number: string; employee_id: string;
 };
 const unwrap = <T,>(value: T[] | { results?: T[] }) => Array.isArray(value) ? value : value.results ?? [];
-const emptyUser = { name: '', email: '', role: 'student' as ManagedUser['role'], password: '', cluster: 'academics' as 'academics' | 'tech_pro', assigned_classes: [] as number[], assigned_subjects: [] as number[], is_active: true, date_of_birth: '', gender: '', phone: '', student_number: '', employee_id: '' };
-const emptyClass = { name: '', grade_level: 11, school_year: '2026-2027', is_active: true };
+const emptyUser = { name: '', email: '', role: 'student' as ManagedUser['role'], password: '', cluster: 'academics' as 'academics' | 'tech_pro', cluster_record: null as number | null, assigned_classes: [] as number[], assigned_subjects: [] as number[], is_active: true, date_of_birth: '', gender: '', phone: '', student_number: '', employee_id: '' };
+const emptyClass = { name: '', grade_level: 11, cluster: null as number | null, adviser: null as number | null, school_year: '2026-2027', is_active: true };
 const userViews = ['students', 'teachers', 'administrators'] as const;
 
 export function AdminUsers({ superadmin, mode = 'users' }: { superadmin: boolean; mode?: 'users' | 'classes' }) {
@@ -34,19 +34,26 @@ export function AdminUsers({ superadmin, mode = 'users' }: { superadmin: boolean
   const [formGrade, setFormGrade] = useState(11);
   const [classes, setClasses] = useState<ApiClass[]>([]);
   const [subjects, setSubjects] = useState<ApiSubject[]>([]);
+  const [clusters, setClusters] = useState<ApiCluster[]>([]);
+  const [optionsLoading, setOptionsLoading] = useState(true);
   const [editingUser, setEditingUser] = useState<ManagedUser | null | undefined>();
   const [userForm, setUserForm] = useState(emptyUser);
   const [editingClass, setEditingClass] = useState<ApiClass | null | undefined>();
   const [classForm, setClassForm] = useState(emptyClass);
   const [error, setError] = useState('');
+  const [userError, setUserError] = useState('');
   const [success, setSuccess] = useState('');
 
-  const loadOptions = () => Promise.all([
+  const loadOptions = () => {
+    setOptionsLoading(true);
+    return Promise.all([
     api<ApiClass[] | { results?: ApiClass[] }>('/classes/?page_size=100&status=active'),
     api<ApiSubject[] | { results?: ApiSubject[] }>('/subjects/?page_size=100&status=active'),
-  ]).then(([classRows, subjectRows]) => {
-    setClasses(unwrap(classRows)); setSubjects(unwrap(subjectRows));
-  }).catch(reason => setError(reason.message));
+    api<ApiCluster[] | { results?: ApiCluster[] }>('/clusters/?page_size=100'),
+  ]).then(([classRows, subjectRows, clusterRows]) => {
+    setClasses(unwrap(classRows)); setSubjects(unwrap(subjectRows)); setClusters(unwrap(clusterRows));
+  }).catch(reason => setError(reason.message)).finally(() => setOptionsLoading(false));
+  };
   useEffect(() => { void loadOptions(); }, []);
 
   const isClassTab = mode === 'classes';
@@ -55,29 +62,31 @@ export function AdminUsers({ superadmin, mode = 'users' }: { superadmin: boolean
   const userTable = useServerTable<ManagedUser>({ path: '/users/', initialSort: roleForTab === 'student' ? 'grade' : 'user', extraParams: `role=${roleForTab}${studentFilters}` });
   const classTable = useServerTable<ApiClass>({ path: '/classes/', initialSort: 'class', extraParams: `grade=${classGrade}` });
   const openUser = (user?: ManagedUser) => {
+    setUserError('');
     setEditingUser(user ?? null);
-    setUserForm(user ? { name: user.name, email: user.email, role: user.role, password: '', cluster: user.cluster || 'academics', assigned_classes: user.assigned_classes, assigned_subjects: user.assigned_subjects, is_active: user.is_active, date_of_birth: user.date_of_birth ?? '', gender: user.gender, phone: user.phone, student_number: user.student_number, employee_id: user.employee_id } : { ...emptyUser, role: roleForTab });
+    setUserForm(user ? { name: user.name, email: user.email, role: user.role, password: '', cluster: user.cluster || 'academics', cluster_record: user.cluster_record, assigned_classes: user.assigned_classes, assigned_subjects: user.assigned_subjects, is_active: user.is_active, date_of_birth: user.date_of_birth ?? '', gender: user.gender, phone: user.phone, student_number: user.student_number, employee_id: user.employee_id } : { ...emptyUser, role: roleForTab, cluster_record: clusters.find(item => item.is_active)?.id ?? null });
     setFormGrade(user?.grade_level ?? 11);
   };
   const saveUser = async () => {
-    const body: Record<string, unknown> = { ...userForm, grade_level: userForm.role === 'student' ? formGrade : undefined, cluster: userForm.role === 'student' ? userForm.cluster : undefined, date_of_birth: userForm.date_of_birth || null, assigned_classes: userForm.role === 'teacher' ? userForm.assigned_classes : [], assigned_subjects: userForm.role === 'teacher' ? userForm.assigned_subjects : [] };
+    setUserError('');
+    const body: Record<string, unknown> = { ...userForm, grade_level: userForm.role === 'student' ? formGrade : undefined, cluster_record: userForm.role === 'student' ? userForm.cluster_record : undefined, date_of_birth: userForm.date_of_birth || null, assigned_classes: userForm.role === 'teacher' ? userForm.assigned_classes : [], assigned_subjects: userForm.role === 'teacher' ? userForm.assigned_subjects : [] };
     if (!userForm.password) delete body.password;
     try {
       await api(editingUser ? `/users/${editingUser.id}/` : '/users/', { method: editingUser ? 'PATCH' : 'POST', body: JSON.stringify(body) });
       setSuccess(editingUser ? 'User account updated.' : 'User account created.'); setEditingUser(undefined); userTable.reload();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to save this user.'); }
+    } catch (reason) { setUserError(reason instanceof Error ? reason.message : 'Unable to save this user.'); }
   };
   const sendReset = async () => {
     if (!editingUser) return;
     try { await api(`/users/${editingUser.id}/send-password-reset/`, { method: 'POST' }); setSuccess(`Password reset instructions sent to ${editingUser.email}.`); setEditingUser(undefined); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to request password reset.'); }
+    catch (reason) { setUserError(reason instanceof Error ? reason.message : 'Unable to request password reset.'); }
   };
   const requireChange = async () => {
     if (!editingUser) return;
     try { await api(`/users/${editingUser.id}/require-password-change/`, { method: 'POST' }); setSuccess('The user will be directed to change their password after sign-in.'); setEditingUser(undefined); userTable.reload(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to update the account.'); }
+    catch (reason) { setUserError(reason instanceof Error ? reason.message : 'Unable to update the account.'); }
   };
-  const openClass = (item?: ApiClass) => { setEditingClass(item ?? null); setClassForm(item ? { name: item.name, grade_level: item.grade_level, school_year: item.school_year, is_active: item.is_active } : emptyClass); };
+  const openClass = (item?: ApiClass) => { setEditingClass(item ?? null); setClassForm(item ? { name: item.name, grade_level: item.grade_level, cluster: item.cluster ?? null, adviser: item.adviser ?? null, school_year: item.school_year, is_active: item.is_active } : { ...emptyClass, cluster: clusters.find(cluster => cluster.is_active)?.id ?? null }); };
   const saveClass = async () => {
     try { await api(editingClass ? `/classes/${editingClass.id}/` : '/classes/', { method: editingClass ? 'PATCH' : 'POST', body: JSON.stringify(classForm) }); setSuccess(editingClass ? 'Class updated.' : 'Class created.'); setEditingClass(undefined); classTable.reload(); await loadOptions(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to save this class.'); }
@@ -105,15 +114,16 @@ export function AdminUsers({ superadmin, mode = 'users' }: { superadmin: boolean
     </Card>
     <Dialog component="form" open={editingUser !== undefined} onClose={() => setEditingUser(undefined)} onSubmit={event => { event.preventDefault(); void saveUser(); }} fullWidth maxWidth="sm">
       <DialogTitle>{editingUser ? `Manage ${userForm.role}` : `Add ${roleForTab}`}</DialogTitle><DialogContent><Stack gap={2} sx={{ pt: 1 }}>
+        {userError && <Alert severity="error" onClose={() => setUserError('')}>{userError}</Alert>}
         <TextField label="Full name" value={userForm.name} onChange={event => setUserForm(value => ({ ...value, name: event.target.value }))} required autoFocus />
         <TextField label="School email" type="email" value={userForm.email} onChange={event => setUserForm(value => ({ ...value, email: event.target.value }))} required />
         <TextField label="Role" value={userForm.role === 'teacher' ? 'Teacher' : userForm.role === 'admin' ? 'Administrator' : 'Student'} disabled helperText="The account type is determined by the selected user-management tab." />
+        {userForm.role === 'teacher' && <><Divider /><Typography variant="h3">Teaching assignment</Typography><MultiSelectField label="Assigned Subjects" options={subjectOptions} value={userForm.assigned_subjects} onChange={ids => setUserForm(value => ({ ...value, assigned_subjects: ids.map(Number) }))} helperText="Select the subjects this teacher handles. Class access is derived automatically from the selected subjects' grade levels." loading={optionsLoading} noOptionsText={subjects.length ? 'No subjects match your search.' : 'No active subjects are available.'} /><Box sx={{ p: 2, bgcolor: 'background.default', border: '1px solid', borderColor: 'divider', borderRadius: 1 }}><Typography variant="body2" fontWeight={700}>Derived Class Access</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{derivedClasses.length ? derivedClasses.map(item => item.label).join(', ') : 'Assign at least one subject to derive class access.'}</Typography></Box><Divider /><Typography variant="h3">Account details</Typography></>}
         <TextField label={userForm.role === 'student' ? 'Student number' : 'Employee ID'} value={userForm.role === 'student' ? userForm.student_number : userForm.employee_id} onChange={event => setUserForm(value => userForm.role === 'student' ? ({ ...value, student_number: event.target.value }) : ({ ...value, employee_id: event.target.value }))} />
         <TextField label="Date of birth" type="date" value={userForm.date_of_birth} onChange={event => setUserForm(value => ({ ...value, date_of_birth: event.target.value }))} InputLabelProps={{ shrink: true }} />
         <TextField label="Contact number" value={userForm.phone} onChange={event => setUserForm(value => ({ ...value, phone: event.target.value }))} />
         {userForm.role === 'student' && <><TextField select label="Grade Level" value={formGrade} onChange={event => setFormGrade(Number(event.target.value))}><MenuItem value={11}>Grade 11</MenuItem><MenuItem value={12}>Grade 12</MenuItem></TextField><TextField select required label="Cluster" value={userForm.cluster} onChange={event => setUserForm(value => ({ ...value, cluster: event.target.value as 'academics' | 'tech_pro' }))}><MenuItem value="academics">Academics</MenuItem><MenuItem value="tech_pro">Tech Pro</MenuItem></TextField></>}
-        {userForm.role === 'teacher' && <><MultiSelectField label="Assigned Subjects" options={subjectOptions} value={userForm.assigned_subjects} onChange={ids => setUserForm(value => ({ ...value, assigned_subjects: ids.map(Number) }))} helperText="Each subject determines its grade level and learner scope." /><Box sx={{ p: 2, bgcolor: 'background.default', border: '1px solid', borderColor: 'divider', borderRadius: 1 }}><Typography variant="body2" fontWeight={700}>Derived Class Access</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{derivedClasses.length ? derivedClasses.map(item => item.label).join(', ') : 'Assign at least one subject to derive class access.'}</Typography></Box></>}
-        <TextField label={editingUser ? 'New password (optional)' : 'Temporary password'} type="password" value={userForm.password} onChange={event => setUserForm(value => ({ ...value, password: event.target.value }))} required={!editingUser} helperText={editingUser ? 'Leave blank to keep the existing password.' : 'At least eight characters. The user can change it after signing in.'} />
+        <TextField label={editingUser ? 'New password (optional)' : 'Temporary password'} type="password" value={userForm.password} onChange={event => setUserForm(value => ({ ...value, password: event.target.value }))} required={!editingUser} helperText={editingUser ? 'Leave blank to keep the existing password.' : 'Use at least eight characters. Avoid common passwords and passwords containing only numbers.'} />
         <FormControlLabel control={<Checkbox checked={userForm.is_active} onChange={event => setUserForm(value => ({ ...value, is_active: event.target.checked }))} />} label="Account is active" />
         {editingUser && <><Divider /><Typography variant="h3">Account recovery</Typography><Stack direction={{ xs: 'column', sm: 'row' }} gap={1}><Button variant="outlined" onClick={sendReset}>Send reset link</Button><Button variant="outlined" onClick={requireChange}>Require password change</Button></Stack></>}
       </Stack></DialogContent><DialogActions><Button onClick={() => setEditingUser(undefined)}>Cancel</Button><Button type="submit" variant="contained">Save user</Button></DialogActions>

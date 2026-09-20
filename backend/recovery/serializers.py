@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from .models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Competency, CompetencyResult, ContentImport, DeviceRegistration, EmergencyContact, EmployeeProfile, EnrollmentRequest, GuardianContact, Intervention, LearnerCompetencyEvidence, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningResource, Notification, NotificationPreference, PracticeQuestion, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, StudentProfile, Subject, SystemConfiguration, UserProfile
+from .models import AIRecommendation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Cluster, Competency, CompetencyResult, ContentImport, DeviceRegistration, EmergencyContact, EmployeeProfile, EnrollmentRequest, GradeLevel, GuardianContact, Intervention, LearnerCompetencyEvidence, LearnerCompetencyState, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningGap, LearningResource, Notification, NotificationPreference, PracticeQuestion, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, SystemConfiguration, Topic, UserProfile
 from .assessment_rules import incomplete_prerequisite_assignments, remedial_student_is_eligible
 from .secure_media import create_media_token
 from .permissions import role_for
@@ -24,22 +24,110 @@ class AcademicClassSerializer(serializers.ModelSerializer):
     teacher_count = serializers.IntegerField(source="assigned_teachers.count", read_only=True)
     class Meta:
         model = AcademicClass
-        fields = ["id", "name", "grade_level", "school_year", "is_active", "class_code", "label", "student_count", "teacher_count"]
+        fields = ["id", "name", "grade_level", "grade_level_record", "cluster", "adviser", "school_year", "is_active", "class_code", "label", "student_count", "teacher_count"]
         read_only_fields = ["class_code"]
     def validate_grade_level(self, value):
         if value not in {11, 12}:
             raise serializers.ValidationError("TALA-AI currently supports Grade 11 and Grade 12 only.")
+        return value
+    def validate_adviser(self, value):
+        if value and getattr(getattr(value, "tala_profile", None), "role", None) != UserProfile.Role.TEACHER:
+            raise serializers.ValidationError("Choose a teacher account as the section adviser.")
         return value
 
 class SubjectSerializer(serializers.ModelSerializer):
     competency_count = serializers.IntegerField(source="competencies.count", read_only=True)
     class Meta:
         model = Subject
-        fields = ["id", "name", "code", "grade_level", "is_active", "competency_count"]
+        fields = ["id", "name", "code", "grade_level", "clusters", "is_active", "competency_count"]
     def validate_grade_level(self, value):
         if value not in {11, 12}:
             raise serializers.ValidationError("Choose Grade 11 or Grade 12.")
         return value
+
+
+class ClusterSerializer(serializers.ModelSerializer):
+    subject_count = serializers.IntegerField(source="subjects.count", read_only=True)
+
+    class Meta:
+        model = Cluster
+        fields = ["id", "name", "code", "description", "is_active", "subject_count"]
+
+
+class GradeLevelSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GradeLevel
+        fields = ["id", "level", "name", "is_active"]
+
+    def validate_level(self, value):
+        if value not in {11, 12}:
+            raise serializers.ValidationError("TALA-AI currently supports Grade 11 and Grade 12 only.")
+        return value
+
+
+class TopicSerializer(serializers.ModelSerializer):
+    competency_count = serializers.IntegerField(source="competencies.count", read_only=True)
+
+    class Meta:
+        model = Topic
+        fields = ["id", "subject", "code", "title", "description", "sequence_order", "prerequisites", "is_active", "competency_count"]
+
+    def validate(self, attrs):
+        subject = attrs.get("subject", getattr(self.instance, "subject", None))
+        prerequisites = attrs.get("prerequisites", [])
+        if subject and any(item.subject_id != subject.id for item in prerequisites):
+            raise serializers.ValidationError({"prerequisites": "Topic prerequisites must belong to the same subject."})
+        return attrs
+
+
+class SubjectOfferingSerializer(serializers.ModelSerializer):
+    subject_name = serializers.CharField(source="subject.name", read_only=True)
+    class_label = serializers.CharField(source="academic_class.__str__", read_only=True)
+    teacher_name = serializers.SerializerMethodField()
+    enrolled_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SubjectOffering
+        fields = ["id", "subject", "subject_name", "academic_class", "class_label", "teacher", "teacher_name", "school_year", "term", "enrollment_code", "is_active", "enrolled_count", "created_at"]
+        read_only_fields = ["enrollment_code", "created_at"]
+
+    def get_teacher_name(self, offering):
+        return offering.teacher.get_full_name() or offering.teacher.email if offering.teacher else "Unassigned"
+
+    def get_enrolled_count(self, offering):
+        return offering.enrollments.filter(status=SubjectEnrollment.Status.APPROVED).count()
+
+    def validate(self, attrs):
+        subject = attrs.get("subject", getattr(self.instance, "subject", None))
+        academic_class = attrs.get("academic_class", getattr(self.instance, "academic_class", None))
+        teacher = attrs.get("teacher", getattr(self.instance, "teacher", None))
+        if subject and academic_class and subject.grade_level != academic_class.grade_level:
+            raise serializers.ValidationError({"academic_class": "The subject and section must use the same grade level."})
+        if teacher and getattr(getattr(teacher, "tala_profile", None), "role", None) != UserProfile.Role.TEACHER:
+            raise serializers.ValidationError({"teacher": "Choose a teacher account."})
+        return attrs
+
+
+class SubjectEnrollmentSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source="student.get_full_name", read_only=True)
+    student_email = serializers.EmailField(source="student.email", read_only=True)
+    subject = serializers.IntegerField(source="offering.subject_id", read_only=True)
+    subject_name = serializers.CharField(source="offering.subject.name", read_only=True)
+    class_label = serializers.CharField(source="offering.academic_class.__str__", read_only=True)
+    teacher_name = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SubjectEnrollment
+        fields = ["id", "student", "student_name", "student_email", "offering", "subject", "subject_name", "class_label", "teacher_name", "status", "source", "requested_by", "reviewed_by", "reviewed_by_name", "decision_reason", "created_at", "reviewed_at"]
+        read_only_fields = ["status", "source", "requested_by", "reviewed_by", "decision_reason", "created_at", "reviewed_at"]
+
+    def get_teacher_name(self, enrollment):
+        teacher = enrollment.offering.teacher
+        return (teacher.get_full_name() or teacher.email) if teacher else "Unassigned"
+
+    def get_reviewed_by_name(self, enrollment):
+        return enrollment.reviewed_by.get_full_name() or enrollment.reviewed_by.email if enrollment.reviewed_by else ""
 
 class UserAdminSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
@@ -63,6 +151,7 @@ class UserAdminSerializer(serializers.Serializer):
     student_number = serializers.CharField(required=False, allow_blank=True, max_length=40)
     grade_level = serializers.ChoiceField(choices=[11, 12], required=False)
     cluster = serializers.ChoiceField(choices=StudentProfile.Cluster.choices, required=False)
+    cluster_record = serializers.PrimaryKeyRelatedField(queryset=Cluster.objects.filter(is_active=True), required=False, allow_null=True)
     employee_id = serializers.CharField(required=False, allow_blank=True, max_length=40)
 
     def validate_email(self, value):
@@ -106,6 +195,9 @@ class UserAdminSerializer(serializers.Serializer):
                 details.student_number = validated_data["student_number"] or None
             if "cluster" in validated_data:
                 details.cluster = validated_data["cluster"]
+            if "cluster_record" in validated_data:
+                details.cluster_record = validated_data["cluster_record"]
+                details.cluster = StudentProfile.Cluster.TECH_PRO if details.cluster_record and details.cluster_record.code == "TECH-VOC" else StudentProfile.Cluster.ACADEMICS
             if profile.academic_class_id:
                 details.grade_level = profile.academic_class.grade_level
             elif "grade_level" in validated_data:
@@ -169,17 +261,27 @@ class UserAdminSerializer(serializers.Serializer):
         student_details = getattr(profile, "student_details", None)
         employee_details = getattr(profile, "employee_details", None)
         academic_class = profile.academic_class
-        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else student_details.grade_level if student_details else None, "cluster": student_details.cluster if student_details else "", "section": academic_class.name if academic_class else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
+        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else student_details.grade_level if student_details else None, "cluster": student_details.cluster if student_details else "", "cluster_record": student_details.cluster_record_id if student_details else None, "cluster_name": student_details.cluster_record.name if student_details and student_details.cluster_record_id else student_details.get_cluster_display() if student_details else "", "section": academic_class.name if academic_class else "", "adviser": (academic_class.adviser.get_full_name() or academic_class.adviser.email) if academic_class and academic_class.adviser else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
 
 class CompetencySerializer(serializers.ModelSerializer):
     class Meta:
         model = Competency
-        fields = ["id", "subject", "code", "title", "mastery_threshold", "is_active"]
+        fields = ["id", "subject", "topic", "code", "title", "sequence_order", "prerequisites", "mastery_threshold", "is_active"]
 
     def validate_mastery_threshold(self, value):
         if not 1 <= value <= 100:
             raise serializers.ValidationError("Enter a threshold from 1 to 100.")
         return value
+
+    def validate(self, attrs):
+        subject = attrs.get("subject", getattr(self.instance, "subject", None))
+        topic = attrs.get("topic", getattr(self.instance, "topic", None))
+        prerequisites = attrs.get("prerequisites", [])
+        if subject and topic and topic.subject_id != subject.id:
+            raise serializers.ValidationError({"topic": "The topic must belong to the selected subject."})
+        if subject and any(item.subject_id != subject.id for item in prerequisites):
+            raise serializers.ValidationError({"prerequisites": "Competency prerequisites must belong to the same subject."})
+        return attrs
 
 
 class ProfileSerializer(serializers.Serializer):
@@ -247,13 +349,20 @@ class ProfileSerializer(serializers.Serializer):
 class SystemConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemConfiguration
-        fields = ["school_year", "default_mastery_threshold", "developing_support_policy", "reminder_hour", "reminder_days_before", "inactivity_days", "inactivity_reminder_cooldown_days", "consent_policy_version", "consent_policy_approved", "consent_expiry_days", "minor_data_retention_days", "privacy_contact_email", "privacy_notice_version", "privacy_notice_text", "updated_at"]
+        fields = ["school_year", "default_mastery_threshold", "developing_threshold", "developing_support_policy", "reminder_hour", "reminder_days_before", "inactivity_days", "inactivity_reminder_cooldown_days", "consent_policy_version", "consent_policy_approved", "consent_expiry_days", "minor_data_retention_days", "privacy_contact_email", "privacy_notice_version", "privacy_notice_text", "updated_at"]
         read_only_fields = ["updated_at"]
 
     def validate_default_mastery_threshold(self, value):
         if not 1 <= value <= 100:
             raise serializers.ValidationError("Enter a threshold from 1 to 100.")
         return value
+
+    def validate(self, attrs):
+        mastery = attrs.get("default_mastery_threshold", getattr(self.instance, "default_mastery_threshold", 75))
+        developing = attrs.get("developing_threshold", getattr(self.instance, "developing_threshold", 50))
+        if not 1 <= developing < mastery <= 100:
+            raise serializers.ValidationError({"developing_threshold": "The developing threshold must be lower than the mastery threshold."})
+        return attrs
 
     def validate_reminder_hour(self, value):
         if not 0 <= value <= 23:
@@ -414,7 +523,7 @@ class LearningAssignmentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = LearningAssignment
-        fields = ["id", "resource", "resource_title", "resource_type", "purpose", "resource_content", "original_filename", "competency", "file_url", "uploaded_by_name", "assigned_classes", "class_labels", "instructions", "due_at", "is_active", "opened_at", "completed_at", "playback_position_seconds", "duration_seconds", "progress_percent", "practice_questions", "quiz_required", "quiz_passed", "latest_quiz_score", "passing_score", "created_at"]
+        fields = ["id", "resource", "resource_title", "resource_type", "purpose", "resource_content", "original_filename", "competency", "file_url", "uploaded_by_name", "assigned_classes", "subject_offerings", "class_labels", "instructions", "due_at", "is_active", "opened_at", "completed_at", "playback_position_seconds", "duration_seconds", "progress_percent", "practice_questions", "quiz_required", "quiz_passed", "latest_quiz_score", "passing_score", "created_at"]
         read_only_fields = fields
 
 class AssessmentSerializer(serializers.ModelSerializer):
@@ -547,7 +656,7 @@ class AssessmentSerializer(serializers.ModelSerializer):
         return attrs
     class Meta:
         model = Assessment
-        fields = ["id", "title", "subject", "kind", "instructions", "due_at", "is_active", "available", "availability_reason", "remaining_activities", "remaining_prerequisites", "prerequisite_statuses", "consent_status", "created_by", "question_count", "competency_ids", "assigned_classes", "prerequisite_assignments"]
+        fields = ["id", "title", "subject", "topic", "subject_offerings", "kind", "instructions", "due_at", "is_active", "available", "availability_reason", "remaining_activities", "remaining_prerequisites", "prerequisite_statuses", "consent_status", "created_by", "question_count", "competency_ids", "assigned_classes", "prerequisite_assignments"]
         read_only_fields = ["created_by"]
 
 class QuestionPublicSerializer(serializers.ModelSerializer):
@@ -584,6 +693,9 @@ class AssessmentDetailSerializer(AssessmentSerializer):
         target_competency_id = self.context.get("target_competency_id")
         if target_competency_id:
             questions = questions.filter(competency_id=target_competency_id)
+        accessible_competency_ids = self.context.get("accessible_competency_ids")
+        if accessible_competency_ids is not None:
+            questions = questions.filter(competency_id__in=accessible_competency_ids)
         target_question_ids = self.context.get("target_question_ids")
         if target_question_ids:
             questions = questions.filter(id__in=target_question_ids)
@@ -696,13 +808,44 @@ class RecoveryPlanSerializer(serializers.ModelSerializer):
         }
     class Meta:
         model = RecoveryPlan
-        fields = ["id", "student", "competency", "competency_title", "baseline_score", "trigger_status", "trigger_attempt", "status", "created_at", "activities", "mastery_assessment"]
+        fields = ["id", "student", "offering", "learning_gap", "competency", "competency_title", "baseline_score", "trigger_status", "trigger_attempt", "status", "created_at", "activities", "mastery_assessment"]
+
+
+class LearningGapSerializer(serializers.ModelSerializer):
+    competency_title = serializers.CharField(source="competency.title", read_only=True)
+    competency_code = serializers.CharField(source="competency.code", read_only=True)
+    subject = serializers.IntegerField(source="competency.subject_id", read_only=True)
+    subject_name = serializers.CharField(source="competency.subject.name", read_only=True)
+
+    class Meta:
+        model = LearningGap
+        fields = ["id", "student", "offering", "subject", "subject_name", "competency", "competency_code", "competency_title", "trigger_result", "resolved_by_result", "current_score", "classification", "priority", "status", "identified_at", "resolved_at", "updated_at"]
+        read_only_fields = fields
+
+
+class LearnerCompetencyStateSerializer(serializers.ModelSerializer):
+    competency_code = serializers.CharField(source="competency.code", read_only=True)
+    competency_title = serializers.CharField(source="competency.title", read_only=True)
+    topic = serializers.IntegerField(source="competency.topic_id", read_only=True)
+    topic_title = serializers.CharField(source="competency.topic.title", read_only=True)
+
+    class Meta:
+        model = LearnerCompetencyState
+        fields = ["id", "student", "offering", "competency", "competency_code", "competency_title", "topic", "topic_title", "status", "latest_score", "best_score", "decision_reason", "unlocked_at", "mastered_at", "updated_at"]
+        read_only_fields = fields
 
 class InterventionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Intervention
-        fields = ["id", "student", "teacher", "action", "note", "created_at"]
+        fields = ["id", "student", "teacher", "offering", "competency", "recovery_plan", "resource", "assessment", "action", "note", "status", "follow_up_at", "completed_at", "outcome", "created_at"]
         read_only_fields = ["teacher", "created_at"]
+
+
+class AIRecommendationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIRecommendation
+        fields = ["id", "student", "offering", "competency", "learning_gap", "recommendation", "rationale", "evidence_snapshot", "provider", "model", "status", "reviewed_by", "teacher_response", "created_at", "reviewed_at"]
+        read_only_fields = ["student", "offering", "competency", "learning_gap", "recommendation", "rationale", "evidence_snapshot", "provider", "model", "reviewed_by", "created_at", "reviewed_at"]
 
 class ActivityAttemptSerializer(serializers.ModelSerializer):
     class Meta:

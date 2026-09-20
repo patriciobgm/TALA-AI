@@ -5,7 +5,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Assessment, AuditEvent, Competency, ContentImport, LearningAssignment, LearningResource, Notification, PracticeQuestion, Question, UserProfile
+from .models import Assessment, AuditEvent, Competency, ContentImport, LearningAssignment, LearningResource, Notification, PracticeQuestion, Question, SubjectEnrollment, SubjectOffering, UserProfile
 from .notifications import notify
 from .resource_index import index_learning_resource
 from .transcription import transcribe_video
@@ -402,6 +402,7 @@ def publish_content_import(content_import, reviewer):
         )
         class_ids = content_import.configuration.get("assigned_class_ids", [])
         assessment.assigned_classes.set(class_ids)
+        assessment.subject_offerings.set(SubjectOffering.objects.filter(subject=content_import.subject, academic_class_id__in=class_ids, is_active=True))
         for competency, prompt, question_type, options, answer, character_limit in questions:
             Question.objects.create(assessment=assessment, competency=competency, prompt=prompt, question_type=question_type, options=options, correct_answer=answer, character_limit=character_limit)
         content_import.published_assessment = assessment
@@ -435,9 +436,11 @@ def publish_content_import(content_import, reviewer):
         if class_ids:
             assignment = LearningAssignment.objects.create(resource=resource, assigned_by=content_import.uploaded_by, instructions=content_import.configuration.get("instructions", ""), due_at=content_import.configuration.get("due_at") or None)
             assignment.assigned_classes.set(class_ids)
-            students = UserProfile.objects.filter(role=UserProfile.Role.STUDENT, academic_class_id__in=class_ids, is_active=True).select_related("user").distinct()
-            for profile in students:
-                notify(recipient=profile.user, kind=Notification.Kind.LEARNING_ASSIGNED, title="Learning material assigned", message=f"{resource.title} has been assigned to your class.", action_url="/materials", deduplication_key=f"learning-assignment:{assignment.id}:student:{profile.user_id}")
+            offerings = SubjectOffering.objects.filter(subject=content_import.subject, academic_class_id__in=class_ids, is_active=True)
+            assignment.subject_offerings.set(offerings)
+            enrollments = SubjectEnrollment.objects.filter(offering__in=offerings, status=SubjectEnrollment.Status.APPROVED).select_related("student")
+            for enrollment in enrollments:
+                notify(recipient=enrollment.student, kind=Notification.Kind.LEARNING_ASSIGNED, title="Learning material assigned", message=f"{resource.title} has been assigned to your subject.", action_url="/materials", deduplication_key=f"learning-assignment:{assignment.id}:student:{enrollment.student_id}")
     content_import.status = ContentImport.Status.PUBLISHED
     content_import.reviewed_by = reviewer
     content_import.reviewed_at = timezone.now()

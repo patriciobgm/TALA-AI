@@ -4,10 +4,11 @@ from django.utils import timezone
 
 from datetime import timedelta
 
-from recovery.models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, Competency, CompetencyResult, EmployeeProfile, GuardianContact, LearningResource, PracticeQuestion, Question, RecoveryActivity, RecoveryPlan, StudentAnswer, StudentProfile, Subject, UserProfile
+from recovery.models import AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, Cluster, Competency, CompetencyResult, EmployeeProfile, GradeLevel, GuardianContact, LearningAssignment, LearningResource, PracticeQuestion, Question, RecoveryActivity, RecoveryPlan, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, Topic, UserProfile
 from recovery.services import calculate_competency_results, create_recovery_plan
 from recovery.resource_index import index_learning_resource
 from recovery.learning_intelligence import rank_learning_resources
+from recovery.progression_engine import apply_competency_result, initialize_enrollment_progression
 
 class Command(BaseCommand):
     help = "Create an idempotent academic-recovery dataset for local development."
@@ -230,4 +231,35 @@ class Command(BaseCommand):
             GuardianContact.objects.update_or_create(profile=profile, name=f"Parent of {profile.user.first_name or 'Learner'}", defaults={"relationship": "Parent", "phone": f"0917000{index:04d}", "email": f"guardian{index}@example.com", "receives_progress_updates": True})
         for index, profile in enumerate(UserProfile.objects.exclude(role=UserProfile.Role.STUDENT).order_by("user_id"), start=1):
             EmployeeProfile.objects.update_or_create(profile=profile, defaults={"employee_id": f"EMP-2026-{index:03d}"})
+
+        academic_cluster, _ = Cluster.objects.get_or_create(code="ACADEMIC", defaults={"name": "Academic"})
+        tech_voc_cluster, _ = Cluster.objects.get_or_create(code="TECH-VOC", defaults={"name": "Technical-Vocational (Tech-Voc)"})
+        for level in (11, 12):
+            grade, _ = GradeLevel.objects.get_or_create(level=level, defaults={"name": f"Grade {level}"})
+            AcademicClass.objects.filter(grade_level=level, grade_level_record__isnull=True).update(grade_level_record=grade)
+        for details in StudentProfile.objects.select_related("profile__academic_class"):
+            details.cluster_record = tech_voc_cluster if details.cluster == StudentProfile.Cluster.TECH_PRO else academic_cluster
+            details.save(update_fields=["cluster_record"])
+        for current_subject in Subject.objects.all():
+            current_subject.clusters.add(academic_cluster, tech_voc_cluster)
+            topic, _ = Topic.objects.get_or_create(subject=current_subject, code=f"{current_subject.code}-CORE", defaults={"title": "Core competencies", "sequence_order": 1})
+            for position, competency in enumerate(current_subject.competencies.order_by("id"), start=1):
+                competency.topic = topic
+                competency.sequence_order = position
+                competency.save(update_fields=["topic", "sequence_order"])
+            for section in AcademicClass.objects.filter(grade_level=current_subject.grade_level):
+                teacher_user = User.objects.filter(tala_profile__role=UserProfile.Role.TEACHER, tala_profile__assigned_subjects=current_subject, tala_profile__assigned_classes=section).order_by("id").first()
+                offering, _ = SubjectOffering.objects.update_or_create(subject=current_subject, academic_class=section, school_year=section.school_year, term="Full year", defaults={"teacher": teacher_user, "enrollment_code": f"{current_subject.code}-{section.class_code}", "is_active": True})
+                for learner_profile in UserProfile.objects.filter(role=UserProfile.Role.STUDENT, academic_class=section).select_related("user"):
+                    enrollment, _ = SubjectEnrollment.objects.get_or_create(student=learner_profile.user, offering=offering, status=SubjectEnrollment.Status.APPROVED, defaults={"source": SubjectEnrollment.Source.MIGRATION, "requested_by": learner_profile.user, "reviewed_by": teacher_user, "reviewed_at": timezone.now(), "decision_reason": "Seeded approved subject enrollment."})
+                    initialize_enrollment_progression(enrollment)
+                for current_assessment in Assessment.objects.filter(subject=current_subject, assigned_classes=section):
+                    current_assessment.subject_offerings.add(offering)
+                for assignment in LearningAssignment.objects.filter(resource__competencies__subject=current_subject, assigned_classes=section).distinct():
+                    assignment.subject_offerings.add(offering)
+        for result in CompetencyResult.objects.select_related("attempt__student", "attempt__assessment", "competency__subject").filter(attempt__submitted_at__isnull=False):
+            enrollment = SubjectEnrollment.objects.filter(student=result.attempt.student, offering__subject=result.competency.subject, status=SubjectEnrollment.Status.APPROVED).select_related("offering").first()
+            if enrollment:
+                gap, _ = apply_competency_result(result.attempt.student, result, enrollment.offering)
+                RecoveryPlan.objects.filter(student=result.attempt.student, competency=result.competency, status="active").update(offering=enrollment.offering, learning_gap=gap)
         self.stdout.write(self.style.SUCCESS("Demo data ready: 2 administrators (including 1 superadministrator), 3 teachers, 10 students, 3 classes, 5 subjects, and 20 competencies. Shared password: demo-password"))

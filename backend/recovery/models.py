@@ -7,12 +7,46 @@ import secrets
 def generate_class_code():
     return secrets.token_hex(4).upper()
 
+
+def generate_enrollment_code():
+    return f"SUB-{secrets.token_hex(4).upper()}"
+
+
+class Cluster(models.Model):
+    """Persisted learner pathway used to control subject availability."""
+
+    name = models.CharField(max_length=120, unique=True)
+    code = models.CharField(max_length=24, unique=True)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class GradeLevel(models.Model):
+    level = models.PositiveSmallIntegerField(unique=True)
+    name = models.CharField(max_length=80)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["level"]
+
+    def __str__(self):
+        return self.name
+
 class AcademicClass(models.Model):
     name = models.CharField(max_length=120)
     grade_level = models.PositiveSmallIntegerField()
     school_year = models.CharField(max_length=16)
     is_active = models.BooleanField(default=True)
     class_code = models.CharField(max_length=16, unique=True, null=True, blank=True)
+    cluster = models.ForeignKey(Cluster, null=True, blank=True, related_name="sections", on_delete=models.PROTECT)
+    grade_level_record = models.ForeignKey(GradeLevel, null=True, blank=True, related_name="sections", on_delete=models.PROTECT)
+    adviser = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="advised_sections", on_delete=models.SET_NULL)
 
     class Meta:
         verbose_name_plural = "academic classes"
@@ -98,14 +132,15 @@ class PrivacyAcknowledgment(models.Model):
 
 class StudentProfile(models.Model):
     class Cluster(models.TextChoices):
-        ACADEMICS = "academics", "Academics"
-        TECH_PRO = "tech_pro", "Tech Pro"
+        ACADEMICS = "academics", "Academic"
+        TECH_PRO = "tech_pro", "Technical-Vocational (Tech-Voc)"
 
     profile = models.OneToOneField(UserProfile, related_name="student_details", on_delete=models.CASCADE)
     student_number = models.CharField(max_length=40, unique=True, null=True, blank=True)
     learner_reference_number = models.CharField(max_length=40, blank=True)
     grade_level = models.PositiveSmallIntegerField(default=11)
     cluster = models.CharField(max_length=16, choices=Cluster.choices, default=Cluster.ACADEMICS)
+    cluster_record = models.ForeignKey("Cluster", null=True, blank=True, related_name="students", on_delete=models.PROTECT)
 
 class EmployeeProfile(models.Model):
     profile = models.OneToOneField(UserProfile, related_name="employee_details", on_delete=models.CASCADE)
@@ -133,20 +168,104 @@ class Subject(models.Model):
     name = models.CharField(max_length=120, unique=True)
     code = models.CharField(max_length=24, unique=True)
     grade_level = models.PositiveSmallIntegerField(default=11)
+    clusters = models.ManyToManyField(Cluster, related_name="subjects", blank=True)
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
         return self.name
 
+
+class Topic(models.Model):
+    subject = models.ForeignKey(Subject, related_name="topics", on_delete=models.CASCADE)
+    code = models.CharField(max_length=40)
+    title = models.CharField(max_length=240)
+    description = models.TextField(blank=True)
+    sequence_order = models.PositiveSmallIntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+    prerequisites = models.ManyToManyField("self", symmetrical=False, related_name="unlocks_topics", blank=True)
+
+    class Meta:
+        ordering = ["subject_id", "sequence_order", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["subject", "code"], name="unique_subject_topic_code"),
+            models.UniqueConstraint(fields=["subject", "sequence_order"], name="unique_subject_topic_sequence"),
+        ]
+
+    def __str__(self):
+        return f"{self.code} · {self.title}"
+
 class Competency(models.Model):
     subject = models.ForeignKey(Subject, related_name="competencies", on_delete=models.CASCADE)
+    topic = models.ForeignKey(Topic, null=True, blank=True, related_name="competencies", on_delete=models.PROTECT)
     code = models.CharField(max_length=32)
     title = models.CharField(max_length=240)
+    sequence_order = models.PositiveSmallIntegerField(default=1)
+    prerequisites = models.ManyToManyField("self", symmetrical=False, related_name="unlocks_competencies", blank=True)
     mastery_threshold = models.PositiveSmallIntegerField(default=75)
     is_active = models.BooleanField(default=True)
 
     class Meta:
+        ordering = ["subject_id", "topic_id", "sequence_order", "id"]
         constraints = [models.UniqueConstraint(fields=["subject", "code"], name="unique_subject_competency")]
+
+
+class SubjectOffering(models.Model):
+    """A subject delivered by a teacher to one section in a school term."""
+
+    subject = models.ForeignKey(Subject, related_name="offerings", on_delete=models.PROTECT)
+    academic_class = models.ForeignKey(AcademicClass, related_name="subject_offerings", on_delete=models.PROTECT)
+    teacher = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="teaching_offerings", on_delete=models.SET_NULL)
+    school_year = models.CharField(max_length=16)
+    term = models.CharField(max_length=40, default="Full year")
+    enrollment_code = models.CharField(max_length=20, unique=True, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["subject__name", "academic_class__grade_level", "academic_class__name"]
+        constraints = [
+            models.UniqueConstraint(fields=["subject", "academic_class", "school_year", "term"], name="unique_subject_section_term_offering"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.enrollment_code:
+            self.enrollment_code = generate_enrollment_code()
+            while SubjectOffering.objects.filter(enrollment_code=self.enrollment_code).exclude(pk=self.pk).exists():
+                self.enrollment_code = generate_enrollment_code()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.subject.name} · {self.academic_class}"
+
+
+class SubjectEnrollment(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending teacher approval"
+        APPROVED = "approved", "Enrolled"
+        DECLINED = "declined", "Declined"
+        WITHDRAWN = "withdrawn", "Withdrawn"
+
+    class Source(models.TextChoices):
+        STUDENT = "student", "Learner request"
+        TEACHER = "teacher", "Teacher enrollment"
+        ADMIN = "admin", "Administrator override"
+        MIGRATION = "migration", "Migrated record"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="subject_enrollments", on_delete=models.CASCADE)
+    offering = models.ForeignKey(SubjectOffering, related_name="enrollments", on_delete=models.PROTECT)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    source = models.CharField(max_length=16, choices=Source.choices)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="requested_subject_enrollments", on_delete=models.PROTECT)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="reviewed_subject_enrollments", on_delete=models.PROTECT)
+    decision_reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["student", "offering"], condition=models.Q(status__in=["pending", "approved"]), name="unique_current_student_subject_enrollment"),
+        ]
 
 class LearningResource(models.Model):
     class ResourceType(models.TextChoices):
@@ -192,6 +311,7 @@ class LearningAssignment(models.Model):
     resource = models.OneToOneField(LearningResource, related_name="assignment", on_delete=models.CASCADE)
     assigned_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="created_learning_assignments", on_delete=models.PROTECT)
     assigned_classes = models.ManyToManyField(AcademicClass, related_name="learning_assignments")
+    subject_offerings = models.ManyToManyField(SubjectOffering, related_name="learning_assignments", blank=True)
     instructions = models.TextField(blank=True)
     due_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
@@ -250,6 +370,8 @@ class Assessment(models.Model):
         REMEDIAL = "remedial", "Remedial exam"
     title = models.CharField(max_length=240)
     subject = models.ForeignKey(Subject, on_delete=models.PROTECT)
+    topic = models.ForeignKey(Topic, null=True, blank=True, related_name="assessments", on_delete=models.PROTECT)
+    subject_offerings = models.ManyToManyField(SubjectOffering, related_name="assessments", blank=True)
     kind = models.CharField(max_length=8, choices=Kind.choices)
     is_active = models.BooleanField(default=False)
     instructions = models.TextField(blank=True)
@@ -368,9 +490,65 @@ class CompetencyResult(models.Model):
     score = models.DecimalField(max_digits=5, decimal_places=2)
     status = models.CharField(max_length=16, choices=Status.choices)
 
+
+class LearningGap(models.Model):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        MONITORING = "monitoring", "Monitoring"
+        RESOLVED = "resolved", "Resolved"
+
+    class Priority(models.TextChoices):
+        HIGH = "high", "High"
+        MEDIUM = "medium", "Medium"
+        LOW = "low", "Low"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="learning_gaps", on_delete=models.CASCADE)
+    offering = models.ForeignKey(SubjectOffering, null=True, blank=True, related_name="learning_gaps", on_delete=models.PROTECT)
+    competency = models.ForeignKey(Competency, related_name="learning_gaps", on_delete=models.PROTECT)
+    trigger_result = models.ForeignKey(CompetencyResult, null=True, blank=True, related_name="identified_learning_gaps", on_delete=models.SET_NULL)
+    resolved_by_result = models.ForeignKey(CompetencyResult, null=True, blank=True, related_name="resolved_learning_gaps", on_delete=models.SET_NULL)
+    current_score = models.DecimalField(max_digits=5, decimal_places=2)
+    classification = models.CharField(max_length=16, choices=CompetencyResult.Status.choices)
+    priority = models.CharField(max_length=12, choices=Priority.choices, default=Priority.MEDIUM)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.OPEN)
+    identified_at = models.DateTimeField(default=timezone.now)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["status", "-identified_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["student", "competency"], condition=models.Q(status__in=["open", "monitoring"]), name="unique_active_student_competency_gap"),
+        ]
+
+
+class LearnerCompetencyState(models.Model):
+    class Status(models.TextChoices):
+        LOCKED = "locked", "Locked"
+        AVAILABLE = "available", "Available"
+        IN_PROGRESS = "in_progress", "In progress"
+        MASTERED = "mastered", "Mastered"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="competency_states", on_delete=models.CASCADE)
+    offering = models.ForeignKey(SubjectOffering, null=True, blank=True, related_name="learner_competency_states", on_delete=models.PROTECT)
+    competency = models.ForeignKey(Competency, related_name="learner_states", on_delete=models.PROTECT)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.LOCKED)
+    latest_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    best_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    decision_reason = models.CharField(max_length=300, blank=True)
+    unlocked_at = models.DateTimeField(null=True, blank=True)
+    mastered_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["competency__sequence_order", "competency_id"]
+        constraints = [models.UniqueConstraint(fields=["student", "offering", "competency"], name="unique_student_offering_competency_state")]
+
 class RecoveryPlan(models.Model):
     student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="recovery_plans", on_delete=models.CASCADE)
     competency = models.ForeignKey(Competency, on_delete=models.PROTECT)
+    offering = models.ForeignKey(SubjectOffering, null=True, blank=True, related_name="recovery_plans", on_delete=models.PROTECT)
+    learning_gap = models.ForeignKey(LearningGap, null=True, blank=True, related_name="recovery_plans", on_delete=models.SET_NULL)
     baseline_score = models.DecimalField(max_digits=5, decimal_places=2)
     trigger_status = models.CharField(max_length=16, blank=True)
     trigger_attempt = models.ForeignKey(AssessmentAttempt, null=True, blank=True, related_name="generated_recovery_plans", on_delete=models.SET_NULL)
@@ -395,6 +573,9 @@ class RecoveryActivity(models.Model):
 class LearningRecommendationDecision(models.Model):
     class Decision(models.TextChoices):
         ACCEPTED = "accepted", "Accepted"
+        MODIFIED = "modified", "Modified"
+        OVERRIDDEN = "overridden", "Overridden"
+        IGNORED = "ignored", "Ignored"
         DISMISSED = "dismissed", "Dismissed"
 
     student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="learning_recommendation_decisions", on_delete=models.CASCADE)
@@ -404,6 +585,8 @@ class LearningRecommendationDecision(models.Model):
     decision = models.CharField(max_length=12, choices=Decision.choices)
     score = models.DecimalField(max_digits=6, decimal_places=2)
     rationale = models.JSONField(default=dict)
+    teacher_note = models.TextField(blank=True)
+    evidence_snapshot = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -421,11 +604,53 @@ class ActivityAttempt(models.Model):
         ordering = ["-started_at"]
 
 class Intervention(models.Model):
+    class Status(models.TextChoices):
+        PLANNED = "planned", "Planned"
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+
     student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="interventions", on_delete=models.CASCADE)
     teacher = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="assigned_interventions", on_delete=models.PROTECT)
+    offering = models.ForeignKey(SubjectOffering, null=True, blank=True, related_name="interventions", on_delete=models.PROTECT)
+    competency = models.ForeignKey(Competency, null=True, blank=True, related_name="interventions", on_delete=models.PROTECT)
+    recovery_plan = models.ForeignKey(RecoveryPlan, null=True, blank=True, related_name="interventions", on_delete=models.SET_NULL)
+    resource = models.ForeignKey(LearningResource, null=True, blank=True, related_name="interventions", on_delete=models.PROTECT)
+    assessment = models.ForeignKey(Assessment, null=True, blank=True, related_name="interventions", on_delete=models.PROTECT)
     action = models.CharField(max_length=32)
     note = models.TextField()
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PLANNED)
+    follow_up_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    outcome = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class AIRecommendation(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Awaiting teacher review"
+        ACCEPTED = "accepted", "Accepted"
+        MODIFIED = "modified", "Modified"
+        OVERRIDDEN = "overridden", "Overridden"
+        IGNORED = "ignored", "Ignored"
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="ai_recommendations", on_delete=models.CASCADE)
+    offering = models.ForeignKey(SubjectOffering, null=True, blank=True, related_name="ai_recommendations", on_delete=models.PROTECT)
+    competency = models.ForeignKey(Competency, null=True, blank=True, related_name="ai_recommendations", on_delete=models.PROTECT)
+    learning_gap = models.ForeignKey(LearningGap, null=True, blank=True, related_name="ai_recommendations", on_delete=models.SET_NULL)
+    recommendation = models.TextField()
+    rationale = models.TextField(blank=True)
+    evidence_snapshot = models.JSONField(default=dict)
+    provider = models.CharField(max_length=32, blank=True)
+    model = models.CharField(max_length=120, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="reviewed_ai_recommendations", on_delete=models.PROTECT)
+    teacher_response = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
 
 class AIConversation(models.Model):
     student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="ai_conversations", on_delete=models.CASCADE)
@@ -734,6 +959,8 @@ class ContentImport(models.Model):
 
 class Notification(models.Model):
     class Kind(models.TextChoices):
+        ENROLLMENT_REQUESTED = "enrollment_requested", "Enrollment requested"
+        ENROLLMENT_UPDATED = "enrollment_updated", "Enrollment updated"
         PLAN_ASSIGNED = "plan_assigned", "Recovery plan assigned"
         ACTIVITY_DUE = "activity_due", "Activity due"
         ACTIVITY_OVERDUE = "activity_overdue", "Activity overdue"
@@ -814,6 +1041,7 @@ class SystemConfiguration(models.Model):
 
     school_year = models.CharField(max_length=16, default="2026-2027")
     default_mastery_threshold = models.PositiveSmallIntegerField(default=75)
+    developing_threshold = models.PositiveSmallIntegerField(default=50)
     developing_support_policy = models.CharField(max_length=16, choices=[("monitor", "Monitor only"), ("guided", "Guided support plan"), ("full", "Full recovery plan")], default="guided")
     reminder_hour = models.PositiveSmallIntegerField(default=7)
     reminder_days_before = models.PositiveSmallIntegerField(default=2)
