@@ -1,4 +1,5 @@
 import hashlib
+import re
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -39,7 +40,8 @@ class SubjectSerializer(serializers.ModelSerializer):
     competency_count = serializers.IntegerField(source="competencies.count", read_only=True)
     class Meta:
         model = Subject
-        fields = ["id", "name", "code", "grade_level", "clusters", "is_active", "competency_count"]
+        fields = ["id", "name", "code", "grade_level", "clusters", "is_active", "competency_count", "curriculum_source_name", "curriculum_analysis_status", "curriculum_analysis", "curriculum_analysis_error", "curriculum_analyzed_at"]
+        read_only_fields = ["curriculum_source_name", "curriculum_analysis_status", "curriculum_analysis", "curriculum_analysis_error", "curriculum_analyzed_at"]
     def validate_grade_level(self, value):
         if value not in {11, 12}:
             raise serializers.ValidationError("Choose Grade 11 or Grade 12.")
@@ -111,6 +113,7 @@ class SubjectOfferingSerializer(serializers.ModelSerializer):
 class SubjectEnrollmentSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="student.get_full_name", read_only=True)
     student_email = serializers.EmailField(source="student.email", read_only=True)
+    student_lrn = serializers.SerializerMethodField()
     subject = serializers.IntegerField(source="offering.subject_id", read_only=True)
     subject_name = serializers.CharField(source="offering.subject.name", read_only=True)
     class_label = serializers.CharField(source="offering.academic_class.__str__", read_only=True)
@@ -119,12 +122,16 @@ class SubjectEnrollmentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SubjectEnrollment
-        fields = ["id", "student", "student_name", "student_email", "offering", "subject", "subject_name", "class_label", "teacher_name", "status", "source", "requested_by", "reviewed_by", "reviewed_by_name", "decision_reason", "created_at", "reviewed_at"]
+        fields = ["id", "student", "student_name", "student_email", "student_lrn", "offering", "subject", "subject_name", "class_label", "teacher_name", "status", "source", "requested_by", "reviewed_by", "reviewed_by_name", "decision_reason", "created_at", "reviewed_at"]
         read_only_fields = ["status", "source", "requested_by", "reviewed_by", "decision_reason", "created_at", "reviewed_at"]
 
     def get_teacher_name(self, enrollment):
         teacher = enrollment.offering.teacher
         return (teacher.get_full_name() or teacher.email) if teacher else "Unassigned"
+
+    def get_student_lrn(self, enrollment):
+        details = getattr(getattr(enrollment.student, "tala_profile", None), "student_details", None)
+        return details.learner_reference_number if details else ""
 
     def get_reviewed_by_name(self, enrollment):
         return enrollment.reviewed_by.get_full_name() or enrollment.reviewed_by.email if enrollment.reviewed_by else ""
@@ -149,6 +156,7 @@ class UserAdminSerializer(serializers.Serializer):
     gender = serializers.CharField(required=False, allow_blank=True, max_length=32)
     phone = serializers.CharField(required=False, allow_blank=True, max_length=32)
     student_number = serializers.CharField(required=False, allow_blank=True, max_length=40)
+    learner_reference_number = serializers.CharField(required=False, allow_blank=True, max_length=12)
     grade_level = serializers.ChoiceField(choices=[11, 12], required=False)
     cluster = serializers.ChoiceField(choices=StudentProfile.Cluster.choices, required=False)
     cluster_record = serializers.PrimaryKeyRelatedField(queryset=Cluster.objects.filter(is_active=True), required=False, allow_null=True)
@@ -178,6 +186,17 @@ class UserAdminSerializer(serializers.Serializer):
                 raise serializers.ValidationError({"role": "You cannot change your own administrator role."})
         if not self.instance and not attrs.get("password"):
             raise serializers.ValidationError({"password": "A temporary password is required."})
+        if role == UserProfile.Role.STUDENT:
+            existing_student = getattr(getattr(self.instance, "tala_profile", None), "student_details", None)
+            lrn = str(attrs.get("learner_reference_number", getattr(existing_student, "learner_reference_number", "") or "")).strip()
+            if not self.instance and not re.fullmatch(r"\d{12}", lrn):
+                raise serializers.ValidationError({"learner_reference_number": "Enter the learner's 12-digit LRN."})
+            if lrn:
+                duplicate = StudentProfile.objects.filter(learner_reference_number=lrn)
+                if existing_student:
+                    duplicate = duplicate.exclude(pk=existing_student.pk)
+                if duplicate.exists():
+                    raise serializers.ValidationError({"learner_reference_number": "This LRN is already linked to a learner account."})
         if role == UserProfile.Role.TEACHER:
             existing_employee = getattr(getattr(self.instance, "tala_profile", None), "employee_details", None)
             cluster = attrs.get("cluster_record", getattr(existing_employee, "cluster", None))
@@ -203,6 +222,8 @@ class UserAdminSerializer(serializers.Serializer):
             details, _ = StudentProfile.objects.get_or_create(profile=profile)
             if "student_number" in validated_data:
                 details.student_number = validated_data["student_number"] or None
+            if "learner_reference_number" in validated_data:
+                details.learner_reference_number = validated_data["learner_reference_number"] or None
             if "cluster" in validated_data:
                 details.cluster = validated_data["cluster"]
             if "cluster_record" in validated_data:
@@ -277,7 +298,7 @@ class UserAdminSerializer(serializers.Serializer):
         pending_approval = False
         if not profile.is_active:
             pending_approval = AuditEvent.objects.filter(object_type="User", object_id=str(user.id), action__in=["account.registration_requested", "account.teacher_registration_requested"]).exists() and not AuditEvent.objects.filter(object_type="User", object_id=str(user.id), action="user.approved").exists()
-        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else student_details.grade_level if student_details else None, "cluster": student_details.cluster if student_details else "", "cluster_record": cluster_record.id if cluster_record else None, "cluster_name": cluster_record.name if cluster_record else student_details.get_cluster_display() if student_details else "", "section": academic_class.name if academic_class else "", "adviser": (academic_class.adviser.get_full_name() or academic_class.adviser.email) if academic_class and academic_class.adviser else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Pending approval" if pending_approval else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "student_number": student_details.student_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
+        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "is_superadmin": user.is_superuser, "academic_class": profile.academic_class_id, "grade_level": academic_class.grade_level if academic_class else student_details.grade_level if student_details else None, "cluster": student_details.cluster if student_details else "", "cluster_record": cluster_record.id if cluster_record else None, "cluster_name": cluster_record.name if cluster_record else student_details.get_cluster_display() if student_details else "", "section": academic_class.name if academic_class else "", "adviser": (academic_class.adviser.get_full_name() or academic_class.adviser.email) if academic_class and academic_class.adviser else "", "assigned_classes": list(profile.assigned_classes.values_list("id", flat=True)), "assigned_subjects": list(profile.assigned_subjects.values_list("id", flat=True)), "assignment": assignment, "status": "Active" if profile.is_active and user.is_active else "Pending approval" if pending_approval else "Inactive", "is_active": profile.is_active and user.is_active, "last_login": user.last_login, "date_joined": user.date_joined, "mfa_enabled": profile.mfa_enabled, "must_change_password": profile.must_change_password, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "learner_reference_number": student_details.learner_reference_number if student_details else "", "employee_id": employee_details.employee_id if employee_details else ""}
 
 class CompetencySerializer(serializers.ModelSerializer):
     class Meta:
@@ -359,7 +380,7 @@ class ProfileSerializer(serializers.Serializer):
         student_details = getattr(profile, "student_details", None)
         employee_details = getattr(profile, "employee_details", None)
         avatar_url = protected_media_url(request, "avatar", profile.id, f"/api/auth/profile/avatar/{profile.id}/") if profile.avatar else ""
-        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "class_name": str(profile.academic_class) if profile.academic_class else "", "cluster": student_details.cluster if student_details else "", "assignments": assignments, "mfa_enabled": profile.mfa_enabled, "preferred_name": profile.preferred_name, "avatar_url": avatar_url, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "address_line": profile.address_line, "city_municipality": profile.city_municipality, "province": profile.province, "postal_code": profile.postal_code, "identifier": student_details.student_number if student_details else employee_details.employee_id if employee_details else "", "emergency_contacts": list(profile.emergency_contacts.values("id", "name", "relationship", "phone", "email", "is_primary")), "guardian_contacts": list(profile.guardian_contacts.values("id", "name", "relationship", "phone", "email", "receives_progress_updates", "consent_recorded_at"))}
+        return {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email, "role": profile.role, "class_name": str(profile.academic_class) if profile.academic_class else "", "cluster": student_details.cluster if student_details else "", "assignments": assignments, "mfa_enabled": profile.mfa_enabled, "preferred_name": profile.preferred_name, "avatar_url": avatar_url, "date_of_birth": profile.date_of_birth, "gender": profile.gender, "phone": profile.phone, "address_line": profile.address_line, "city_municipality": profile.city_municipality, "province": profile.province, "postal_code": profile.postal_code, "identifier": student_details.learner_reference_number if student_details else employee_details.employee_id if employee_details else "", "emergency_contacts": list(profile.emergency_contacts.values("id", "name", "relationship", "phone", "email", "is_primary")), "guardian_contacts": list(profile.guardian_contacts.values("id", "name", "relationship", "phone", "email", "receives_progress_updates", "consent_recorded_at"))}
 
 
 class SystemConfigurationSerializer(serializers.ModelSerializer):

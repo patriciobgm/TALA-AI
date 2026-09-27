@@ -1,5 +1,6 @@
 import hashlib
 import mimetypes
+import re
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
@@ -117,6 +118,7 @@ def register_student(request):
     email = str(request.data.get("email", "")).strip().casefold()
     name = str(request.data.get("name", "")).strip()
     password = str(request.data.get("password", ""))
+    lrn = re.sub(r"\s+", "", str(request.data.get("lrn", "")))
     try:
         cluster_id = int(request.data.get("cluster"))
         grade_level = int(request.data.get("grade_level"))
@@ -127,6 +129,10 @@ def register_student(request):
         return Response({"email": "Enter a valid email address."}, status=status.HTTP_400_BAD_REQUEST)
     if len(name.split()) < 2:
         return Response({"name": "Enter the learner's complete name."}, status=status.HTTP_400_BAD_REQUEST)
+    if not re.fullmatch(r"\d{12}", lrn):
+        return Response({"lrn": "Enter the learner's 12-digit LRN."}, status=status.HTTP_400_BAD_REQUEST)
+    if StudentProfile.objects.filter(learner_reference_number=lrn).exists():
+        return Response({"lrn": "This LRN is already linked to a learner account."}, status=status.HTTP_409_CONFLICT)
     if get_user_model().objects.filter(username__iexact=email).exists():
         return Response({"email": "An account with this email already exists."}, status=status.HTTP_409_CONFLICT)
     cluster = Cluster.objects.filter(pk=cluster_id, is_active=True).first()
@@ -153,22 +159,12 @@ def register_student(request):
             user=user,
             role=UserProfile.Role.STUDENT,
             academic_class=section,
-            is_active=False,
+            is_active=True,
         )
         legacy_cluster = StudentProfile.Cluster.TECH_PRO if cluster.code == "TECH-PRO" else StudentProfile.Cluster.ACADEMICS
-        StudentProfile.objects.create(profile=profile, grade_level=grade_level, cluster=legacy_cluster, cluster_record=cluster)
-        AuditEvent.objects.create(actor=user, action="account.registration_requested", object_type="User", object_id=str(user.id), metadata={"cluster_id": cluster.id, "section_id": section.id})
-        administrators = get_user_model().objects.filter(tala_profile__role=UserProfile.Role.ADMIN, tala_profile__is_active=True, is_active=True)
-        for administrator in administrators:
-            notify(
-                recipient=administrator,
-                kind=Notification.Kind.INTERVENTION,
-                title="Learner registration awaiting review",
-                message=f"{name} registered for Grade {grade_level} and needs account approval.",
-                action_url="/learners",
-                deduplication_key=f"registration:{user.id}:admin:{administrator.id}",
-            )
-    return Response({"detail": "Registration submitted. A school administrator must approve your account before you can sign in."}, status=status.HTTP_201_CREATED)
+        StudentProfile.objects.create(profile=profile, learner_reference_number=lrn, grade_level=grade_level, cluster=legacy_cluster, cluster_record=cluster)
+        AuditEvent.objects.create(actor=user, action="account.student_registered", object_type="User", object_id=str(user.id), metadata={"cluster_id": cluster.id, "section_id": section.id, "lrn_recorded": True})
+    return Response({"detail": "Account created. Sign in, then enter a subject enrollment code. The assigned teacher will verify each enrollment request."}, status=status.HTTP_201_CREATED)
 
 
 @api_view(["POST"])

@@ -138,6 +138,59 @@ def extract_document_text(content_import):
     return text
 
 
+def analyze_curriculum_document(file_obj, filename, subject):
+    """Build a bounded, reviewable topic and competency proposal from one document."""
+    lowered = filename.casefold()
+    if lowered.endswith(".pdf"):
+        text = _extract_pdf(file_obj)
+    elif lowered.endswith(".docx"):
+        text = _extract_docx(file_obj)
+    else:
+        raise ContentImportError("Upload a text-based PDF or DOCX curriculum document.")
+    text = text.replace("\x00", "").strip()
+    if len(text) < 100:
+        raise ContentImportError("The file does not contain enough readable text. Scanned files require OCR.")
+    response = get_llm_provider().generate(LLMRequest(
+        system=(
+            "You organize approved Philippine senior-high curriculum documents. Return JSON only. "
+            "Use only the supplied document; do not invent outcomes. Produce at most 12 topics and at most "
+            "10 concise competencies per topic. Schema: "
+            '{"topics":[{"code":"T1","title":"...","description":"...","competencies":[{"code":"C1","title":"..."}]}]}'
+        ),
+        messages=[{"role": "user", "content": f"Subject: {subject.code} - {subject.name}\n\nDOCUMENT:\n{_balanced_source_excerpt(text, 12000)}"}],
+        temperature=0.1,
+        max_tokens=2200,
+    ))
+    decoded = _decode_ai_json(response.text)
+    topics = decoded.get("topics", []) if isinstance(decoded, dict) else []
+    normalized, seen_topics, seen_competencies = [], set(), set()
+    for topic_position, raw_topic in enumerate(topics[:12], start=1):
+        if not isinstance(raw_topic, dict):
+            continue
+        topic_code = re.sub(r"[^A-Z0-9_-]", "", str(raw_topic.get("code") or f"T{topic_position}").upper())[:40] or f"T{topic_position}"
+        if topic_code in seen_topics:
+            topic_code = f"T{topic_position}"
+        title = str(raw_topic.get("title", "")).strip()[:240]
+        competencies = []
+        for competency_position, raw_competency in enumerate(raw_topic.get("competencies", [])[:10], start=1):
+            if not isinstance(raw_competency, dict):
+                continue
+            fallback = f"{topic_code}-C{competency_position}"
+            code = re.sub(r"[^A-Z0-9_.-]", "", str(raw_competency.get("code") or fallback).upper())[:32] or fallback
+            if code in seen_competencies:
+                code = fallback
+            competency_title = str(raw_competency.get("title", "")).strip()[:240]
+            if competency_title:
+                seen_competencies.add(code)
+                competencies.append({"code": code, "title": competency_title})
+        if title and competencies:
+            seen_topics.add(topic_code)
+            normalized.append({"code": topic_code, "title": title, "description": str(raw_topic.get("description", "")).strip()[:1000], "competencies": competencies})
+    if not normalized:
+        raise ContentImportError("The AI could not produce a valid curriculum structure from this file.")
+    return {"topics": normalized, "source_character_count": len(text), "provider": response.provider, "model": response.model}
+
+
 QUESTION_START = re.compile(r"(?m)^\s*(\d+)[.)]\s+")
 CHOICE_LINE = re.compile(r"^\s*([A-Fa-f])[.)]\s*(.+?)\s*$")
 INLINE_CHOICE_MARKER = re.compile(r"(?<!\w)([A-Fa-f])[.)]\s*")

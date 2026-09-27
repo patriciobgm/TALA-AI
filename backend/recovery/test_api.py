@@ -19,7 +19,7 @@ from .account_security import _totp
 from .content_imports import _extract_pdf, generate_grounded_practice_questions, parse_module_questions
 from .learning_intelligence import rank_learning_resources
 from .llm.base import LLMResponse, LLMUnavailable
-from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EmployeeProfile, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, UserProfile
+from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EmployeeProfile, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, PrivacyAcknowledgment, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, Topic, UserProfile
 from .services import create_recovery_plan
 from .progression_engine import apply_competency_result
 from .companion_intelligence import record_question_outcome
@@ -214,7 +214,7 @@ References
     def test_new_student_gets_onboarding_email_and_must_change_password(self):
         from django.core import mail
         self.authenticate("admin@tala.edu.ph")
-        created = self.client.post("/api/users/", {"name": "New ARAL Learner", "email": "new.aral@tala.edu.ph", "role": "student", "password": "temporary-password-42", "grade_level": 11, "cluster": "tech_pro", "is_active": True}, format="json")
+        created = self.client.post("/api/users/", {"name": "New ARAL Learner", "email": "new.aral@tala.edu.ph", "role": "student", "password": "temporary-password-42", "learner_reference_number": "200000000001", "grade_level": 11, "cluster": "tech_pro", "is_active": True}, format="json")
         self.assertEqual(created.status_code, 201, created.data)
         self.assertTrue(created.data["must_change_password"])
         self.assertEqual(created.data["assignment"], "Unassigned")
@@ -390,7 +390,7 @@ References
         self.assertEqual(competency.status_code, 201, competency.data)
         academic_class = self.client.post("/api/classes/", {"name": "Luna", "grade_level": 12, "school_year": "2026-2027", "is_active": True}, format="json")
         self.assertEqual(academic_class.status_code, 201, academic_class.data)
-        user = self.client.post("/api/users/", {"name": "Test Learner", "email": "test.learner@tala.edu.ph", "role": "student", "password": "defensible-password-42", "academic_class": academic_class.data["id"], "is_active": True}, format="json")
+        user = self.client.post("/api/users/", {"name": "Test Learner", "email": "test.learner@tala.edu.ph", "role": "student", "password": "defensible-password-42", "learner_reference_number": "200000000002", "academic_class": academic_class.data["id"], "is_active": True}, format="json")
         self.assertEqual(user.status_code, 201, user.data)
         updated = self.client.patch(f"/api/users/{user.data['id']}/", {"is_active": False}, format="json")
         self.assertEqual(updated.status_code, 200, updated.data)
@@ -1363,7 +1363,7 @@ Answer: B
         self.assertEqual(marked.status_code, 200)
         self.assertTrue(marked.data["is_read"])
 
-    def test_learner_registration_is_cluster_scoped_and_requires_admin_approval(self):
+    def test_learner_registration_records_lrn_and_verifies_at_subject_enrollment(self):
         options = self.client.get("/api/auth/registration-options/")
         self.assertEqual(options.status_code, 200, options.data)
         cluster = options.data["clusters"][0]
@@ -1374,6 +1374,7 @@ Answer: B
             "email": email,
             "password": "A-Strong-Password-2026!",
             "name": "Pending Learner",
+            "lrn": "123456789012",
             "cluster": cluster["id"],
             "grade_level": section["grade_level"],
             "section": section["id"],
@@ -1381,11 +1382,14 @@ Answer: B
 
         self.assertEqual(created.status_code, 201, created.data)
         user = get_user_model().objects.get(username=email)
-        self.assertFalse(user.tala_profile.is_active)
+        self.assertTrue(user.tala_profile.is_active)
+        self.assertEqual(user.tala_profile.student_details.learner_reference_number, "123456789012")
         self.assertEqual(user.tala_profile.student_details.cluster_record_id, cluster["id"])
-        denied = self.client.post("/api/auth/login/", {"username": email, "password": "A-Strong-Password-2026!"}, format="json")
-        self.assertEqual(denied.status_code, 400)
-        self.assertTrue(Notification.objects.filter(title="Learner registration awaiting review", recipient__tala_profile__role=UserProfile.Role.ADMIN).exists())
+        signed_in = self.client.post("/api/auth/login/", {"username": email, "password": "A-Strong-Password-2026!"}, format="json")
+        self.assertEqual(signed_in.status_code, 200, signed_in.data)
+        self.assertFalse(Notification.objects.filter(title="Learner registration awaiting review").exists())
+        duplicate = self.client.post("/api/auth/register/", {"email": "other@example.edu.ph", "password": "A-Strong-Password-2026!", "name": "Other Learner", "lrn": "123456789012", "cluster": cluster["id"], "grade_level": section["grade_level"], "section": section["id"]}, format="json")
+        self.assertEqual(duplicate.status_code, 409)
 
     def test_teacher_registration_requires_admin_approval_and_persists_cluster(self):
         cluster = Cluster.objects.get(code="TECH-PRO")
@@ -1445,7 +1449,7 @@ Answer: B
         enrollment = SubjectEnrollment.objects.filter(student=student, status=SubjectEnrollment.Status.APPROVED).first()
         self.authenticate("student@tala.edu.ph")
 
-        duplicate = self.client.post("/api/subject-enrollments/", {"offering": enrollment.offering_id}, format="json")
+        duplicate = self.client.post("/api/subject-enrollments/", {"enrollment_code": enrollment.offering.enrollment_code.lower()}, format="json")
 
         self.assertEqual(duplicate.status_code, 409, duplicate.data)
         self.assertEqual(SubjectEnrollment.objects.filter(student=student, offering=enrollment.offering, status__in=["pending", "approved"]).count(), 1)
@@ -1463,6 +1467,29 @@ Answer: B
 
         self.assertEqual(available.status_code, 200, available.data)
         self.assertNotIn(offering.id, {item["id"] for item in available.data})
+        denied = self.client.post("/api/subject-enrollments/", {"enrollment_code": offering.enrollment_code}, format="json")
+        self.assertEqual(denied.status_code, 403, denied.data)
+
+    @patch("recovery.content_imports.get_llm_provider")
+    def test_admin_can_analyze_and_apply_reviewable_subject_curriculum(self, provider_factory):
+        provider_factory.return_value.generate.return_value = LLMResponse(text=json.dumps({"topics": [{"code": "Q1", "title": "Core concepts", "description": "Curriculum-grounded introduction", "competencies": [{"code": "NEW-01", "title": "Explain the core concept"}]}]}), provider="test", model="curriculum-model")
+        cluster = Cluster.objects.get(code="ACADEMIC")
+        self.authenticate("admin@tala.edu.ph")
+        created = self.client.post("/api/subjects/", {"name": "Changing Curriculum Subject", "code": "CCS", "grade_level": 11, "clusters": [cluster.id], "is_active": True}, format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        document = Document(); document.add_paragraph("Curriculum guide with learning content and a required competency about explaining the core concept. Learners analyze examples, practice the skill, demonstrate understanding, and apply the concept in an authentic senior-high-school learning task.")
+        buffer = BytesIO(); document.save(buffer)
+        upload = SimpleUploadedFile("curriculum-guide.docx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            analyzed = self.client.post(f"/api/subjects/{created.data['id']}/analyze-curriculum/", {"source_file": upload}, format="multipart")
+            self.assertEqual(analyzed.status_code, 200, analyzed.data)
+            self.assertEqual(analyzed.data["curriculum_analysis_status"], "ready")
+            self.assertEqual(analyzed.data["curriculum_analysis"]["topics"][0]["competencies"][0]["code"], "NEW-01")
+            self.assertFalse(Topic.objects.filter(subject_id=created.data["id"]).exists())
+            applied = self.client.post(f"/api/subjects/{created.data['id']}/apply-curriculum/", {}, format="json")
+            self.assertEqual(applied.status_code, 200, applied.data)
+            self.assertEqual(Topic.objects.filter(subject_id=created.data["id"]).count(), 1)
+            self.assertEqual(Competency.objects.filter(subject_id=created.data["id"]).count(), 1)
 
     def test_backend_blocks_direct_access_to_locked_competency(self):
         student = get_user_model().objects.get(username="student@tala.edu.ph")

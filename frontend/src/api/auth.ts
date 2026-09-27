@@ -13,6 +13,6 @@ export async function requestPasswordReset(email: string) { return api<{ detail:
 export async function resetPassword(uid: string, token: string, password: string) { return api<{ detail: string }>('/auth/password-reset/confirm/', { method: 'POST', body: JSON.stringify({ uid, token, password }) }); }
 export interface RegistrationOptions { clusters: { id: number; name: string; code: string }[]; grade_levels: number[]; sections: { id: number; name: string; label: string; grade_level: number; cluster: number | null }[] }
 export async function getRegistrationOptions() { return api<RegistrationOptions>('/auth/registration-options/'); }
-export async function registerStudent(payload: { email: string; password: string; name: string; cluster: number; grade_level: number; section: number }) { return api<{ detail: string }>('/auth/register/', { method: 'POST', body: JSON.stringify(payload) }); }
+export async function registerStudent(payload: { email: string; password: string; name: string; lrn: string; cluster: number; grade_level: number; section: number }) { return api<{ detail: string }>('/auth/register/', { method: 'POST', body: JSON.stringify(payload) }); }
 export async function registerTeacher(payload: { email: string; password: string; name: string; cluster: number }) { return api<{ detail: string }>('/auth/register-teacher/', { method: 'POST', body: JSON.stringify(payload) }); }
 export function logout() { clearSession(); }

@@ -3,7 +3,7 @@ import { PageHeader } from '../components/PageHeader';
 
 export function StudentEnrollmentPage() {
   return <>
-    <PageHeader title="Subject enrollment" description="Browse subjects available for your cluster, grade level, and section. Your assigned teacher reviews each request." />
+    <PageHeader title="Subject enrollment" description="Enter the code shared by your teacher. Your cluster, grade level, and section are checked before the teacher reviews your request." />
     <EnrollmentPanel role="student" />
   </>;
 }

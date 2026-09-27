@@ -137,7 +137,7 @@ class StudentProfile(models.Model):
 
     profile = models.OneToOneField(UserProfile, related_name="student_details", on_delete=models.CASCADE)
     student_number = models.CharField(max_length=40, unique=True, null=True, blank=True)
-    learner_reference_number = models.CharField(max_length=40, blank=True)
+    learner_reference_number = models.CharField(max_length=12, unique=True, null=True, blank=True)
     grade_level = models.PositiveSmallIntegerField(default=11)
     cluster = models.CharField(max_length=16, choices=Cluster.choices, default=Cluster.ACADEMICS)
     cluster_record = models.ForeignKey("Cluster", null=True, blank=True, related_name="students", on_delete=models.PROTECT)
@@ -171,6 +171,12 @@ class Subject(models.Model):
     grade_level = models.PositiveSmallIntegerField(default=11)
     clusters = models.ManyToManyField(Cluster, related_name="subjects", blank=True)
     is_active = models.BooleanField(default=True)
+    curriculum_source_file = models.FileField(upload_to="curriculum-sources/%Y/%m/", null=True, blank=True)
+    curriculum_source_name = models.CharField(max_length=255, blank=True)
+    curriculum_analysis_status = models.CharField(max_length=16, default="not_uploaded")
+    curriculum_analysis = models.JSONField(default=dict, blank=True)
+    curriculum_analysis_error = models.TextField(blank=True)
+    curriculum_analyzed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.name

@@ -2,6 +2,7 @@ from datetime import timedelta
 from decimal import Decimal
 import json
 import re
+from pathlib import Path
 from urllib.parse import quote
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -19,7 +20,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 
-from .content_imports import ContentImportError, process_content_import, publish_content_import, sync_published_practice_questions
+from .content_imports import ContentImportError, analyze_curriculum_document, process_content_import, publish_content_import, sync_published_practice_questions
 from .learning_intelligence import rank_learning_resources, record_evidence
 from .companion_intelligence import record_question_outcome, update_learning_outcome
 from .models import AIHelpRequest, AIMessage, AIMessageEvaluation, AIRecommendation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Cluster, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GradeLevel, GuardianContact, Intervention, LearnerCompetencyEvidence, LearnerCompetencyState, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningGap, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyRequest, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, SystemConfiguration, Topic, UsabilityEvaluation, UserProfile
@@ -376,9 +377,13 @@ class SubjectEnrollmentViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         role = role_for(request.user)
-        offering = SubjectOffering.objects.filter(pk=request.data.get("offering"), is_active=True).select_related("subject", "academic_class", "teacher").first()
+        offering_query = SubjectOffering.objects.filter(is_active=True).select_related("subject", "academic_class", "teacher")
+        enrollment_code = str(request.data.get("enrollment_code", "")).strip().upper()
+        offering = offering_query.filter(enrollment_code__iexact=enrollment_code).first() if enrollment_code else offering_query.filter(pk=request.data.get("offering")).first()
         if not offering:
-            return Response({"offering": "Choose an active subject offering."}, status=status.HTTP_400_BAD_REQUEST)
+            field = "enrollment_code" if enrollment_code else "offering"
+            message = "Enter a valid active subject enrollment code." if enrollment_code else "Choose an active subject offering."
+            return Response({field: message}, status=status.HTTP_400_BAD_REQUEST)
         if role == UserProfile.Role.STUDENT:
             student = request.user
             details = getattr(student.tala_profile, "student_details", None)
@@ -611,6 +616,60 @@ class SubjectViewSet(AuditedAdminModelMixin, viewsets.ModelViewSet):
         for profile in subject.assigned_teachers.all():
             sync_teacher_classes(profile)
         AuditEvent.objects.create(actor=self.request.user, action="subject.updated", object_type="Subject", object_id=str(subject.pk))
+
+    @action(detail=True, methods=["post"], url_path="analyze-curriculum")
+    def analyze_curriculum(self, request, pk=None):
+        subject = self.get_object()
+        source_file = request.FILES.get("source_file")
+        if not source_file:
+            return Response({"source_file": "Choose a PDF or DOCX curriculum file."}, status=status.HTTP_400_BAD_REQUEST)
+        suffix = Path(source_file.name).suffix.casefold()
+        if suffix not in {".pdf", ".docx"}:
+            return Response({"source_file": "Only PDF and DOCX curriculum files are supported."}, status=status.HTTP_400_BAD_REQUEST)
+        if source_file.size > 25 * 1024 * 1024:
+            return Response({"source_file": "The curriculum file must not exceed 25 MB."}, status=status.HTTP_400_BAD_REQUEST)
+        subject.curriculum_source_file.save(Path(source_file.name).name, source_file, save=False)
+        subject.curriculum_source_name = Path(source_file.name).name
+        subject.curriculum_analysis_status = "processing"
+        subject.curriculum_analysis = {}
+        subject.curriculum_analysis_error = ""
+        subject.save()
+        try:
+            with subject.curriculum_source_file.open("rb") as stored_file:
+                proposal = analyze_curriculum_document(stored_file, subject.curriculum_source_name, subject)
+            subject.curriculum_analysis = proposal
+            subject.curriculum_analysis_status = "ready"
+            subject.curriculum_analyzed_at = timezone.now()
+            subject.save(update_fields=["curriculum_analysis", "curriculum_analysis_status", "curriculum_analyzed_at"])
+            AuditEvent.objects.create(actor=request.user, action="subject.curriculum_analyzed", object_type="Subject", object_id=str(subject.id), metadata={"source_name": subject.curriculum_source_name, "topic_count": len(proposal["topics"])})
+        except (ContentImportError, LLMUnavailable, ValueError) as exc:
+            subject.curriculum_analysis_status = "failed"
+            subject.curriculum_analysis_error = str(exc)[:2000]
+            subject.save(update_fields=["curriculum_analysis_status", "curriculum_analysis_error"])
+            return Response(self.get_serializer(subject).data, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(self.get_serializer(subject).data)
+
+    @action(detail=True, methods=["post"], url_path="apply-curriculum")
+    def apply_curriculum(self, request, pk=None):
+        subject = self.get_object()
+        if subject.curriculum_analysis_status != "ready":
+            return Response({"detail": "Analyze a curriculum file before applying its proposal."}, status=status.HTTP_409_CONFLICT)
+        if subject.topics.exists() or subject.competencies.exists():
+            return Response({"detail": "This subject already has curriculum records. Review or edit them instead of replacing them automatically."}, status=status.HTTP_409_CONFLICT)
+        topics = subject.curriculum_analysis.get("topics", [])
+        if not topics:
+            return Response({"detail": "The curriculum proposal is empty."}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            competency_sequence = 1
+            for topic_sequence, item in enumerate(topics, start=1):
+                topic = Topic.objects.create(subject=subject, code=item["code"], title=item["title"], description=item.get("description", ""), sequence_order=topic_sequence)
+                for competency in item.get("competencies", []):
+                    Competency.objects.create(subject=subject, topic=topic, code=competency["code"], title=competency["title"], sequence_order=competency_sequence)
+                    competency_sequence += 1
+            subject.curriculum_analysis_status = "applied"
+            subject.save(update_fields=["curriculum_analysis_status"])
+            AuditEvent.objects.create(actor=request.user, action="subject.curriculum_applied", object_type="Subject", object_id=str(subject.id), metadata={"topic_count": len(topics), "competency_count": competency_sequence - 1})
+        return Response(self.get_serializer(subject).data)
 
 class AcademicClassViewSet(AuditedAdminModelMixin, viewsets.ModelViewSet):
     serializer_class = AcademicClassSerializer

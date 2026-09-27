@@ -3,9 +3,9 @@ import { createTheme } from '@mui/material/styles';
 const buildTheme = (primary: { main: string; dark: string; light: string }, background: string, radius: number) => createTheme({
   palette: {
     mode: 'light', primary,
-    success: { main: '#237a57', light: '#eaf5ef' }, warning: { main: '#a15c0b', light: '#fff4df' },
-    error: { main: '#b42318', light: '#fff0ee' }, info: { main: '#2563a6', light: '#eef5fc' },
-    background: { default: background, paper: '#ffffff' }, text: { primary: '#17212b', secondary: '#5b6875', disabled: '#8a96a3' }, divider: '#dce2e8',
+    success: { main: '#10B981', light: '#ECFDF5' }, warning: { main: '#F59E0B', light: '#FFFBEB' },
+    error: { main: '#b42318', light: '#fff0ee' }, info: { main: '#2563EB', light: '#EFF6FF' },
+    background: { default: background, paper: '#FFFFFF' }, text: { primary: '#1E293B', secondary: '#64748B', disabled: '#94A3B8' }, divider: '#CBD5E1',
   },
   shape: { borderRadius: radius },
   typography: {
@@ -23,9 +23,9 @@ const buildTheme = (primary: { main: string; dark: string; light: string }, back
   },
 });
 
-export const theme = buildTheme({ main: '#174b7a', dark: '#11385d', light: '#e8f1f8' }, '#f5f7f9', 8);
+export const theme = buildTheme({ main: '#2563EB', dark: '#1D4ED8', light: '#EFF6FF' }, '#F1F5F9', 8);
 export const roleThemes = {
-  student: buildTheme({ main: '#16756f', dark: '#0d514d', light: '#e3f4f1' }, '#f3f8f6', 14),
-  teacher: buildTheme({ main: '#315aa8', dark: '#213f7d', light: '#e9effb' }, '#f4f6fb', 10),
-  admin: buildTheme({ main: '#33485f', dark: '#1f3042', light: '#e8edf2' }, '#f3f5f7', 6),
+  student: buildTheme({ main: '#2563EB', dark: '#1D4ED8', light: '#EFF6FF' }, '#F1F5F9', 14),
+  teacher: buildTheme({ main: '#2563EB', dark: '#1D4ED8', light: '#EFF6FF' }, '#F1F5F9', 10),
+  admin: buildTheme({ main: '#2563EB', dark: '#1D4ED8', light: '#EFF6FF' }, '#F1F5F9', 6),
 };
