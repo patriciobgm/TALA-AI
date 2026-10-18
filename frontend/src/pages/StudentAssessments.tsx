@@ -87,6 +87,8 @@ export function StudentAssessments({
   const [result, setResult] = useState<AssessmentAttempt | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [expiresAt, setExpiresAt] = useState("");
+  const [remainingSeconds, setRemainingSeconds] = useState(0);
   const [requirementsAssessment, setRequirementsAssessment] =
     useState<ApiAssessment | null>(null);
   const scope = useStudentScope();
@@ -155,10 +157,11 @@ export function StudentAssessments({
       if (retryQuestionIds.length)
         query.set("questions", retryQuestionIds.join(","));
       try {
-        const response = await api<{ assessment: ApiAssessment }>(
+        const response = await api<{ assessment: ApiAssessment; expires_at: string }>(
           `/assessments/${assessment.id}/start/${query.size ? `?${query}` : ""}`,
         );
         setActive(response.assessment);
+        setExpiresAt(response.expires_at);
         setActiveCompetency(resolvedCompetency);
         setAnswers({});
         setQuestionIndex(0);
@@ -221,6 +224,19 @@ export function StudentAssessments({
       setBusy(false);
     }
   };
+  useEffect(() => {
+    if (!active || !expiresAt || result) return;
+    const tick = () => {
+      const next = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000));
+      setRemainingSeconds(next);
+      if (next === 0 && !busy) void submit();
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  // Re-register on answer changes so timeout submission uses the latest answers.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, answers, expiresAt, result, busy]);
   const assessmentRows = (assessments ?? []).map((assessment) => ({
     assessment,
     previous: attempts.find((attempt) => attempt.assessment === assessment.id),
@@ -270,7 +286,13 @@ export function StudentAssessments({
     ).length;
     const freeResponse = ["short", "essay"].includes(question.question_type);
     return (
-      <>
+      <Box
+        onCopy={(event) => event.preventDefault()}
+        onCut={(event) => event.preventDefault()}
+        onContextMenu={(event) => event.preventDefault()}
+        onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") event.preventDefault(); }}
+        sx={{ userSelect: "none" }}
+      >
         <Button
           startIcon={<ArrowBack />}
           onClick={() => setActive(null)}
@@ -280,8 +302,11 @@ export function StudentAssessments({
         </Button>
         <PageHeader
           title={active.title}
-          description={`${answeredCount} of ${active.questions.length} answered`}
+          description={`${answeredCount} of ${active.questions.length} answered · ${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, "0")} remaining`}
         />
+        <Alert severity={remainingSeconds <= 60 ? "warning" : "info"} sx={{ maxWidth: 840, mx: "auto", mb: 2 }}>
+          The timer continues if you leave this page and submits automatically at zero. Assessment text cannot be copied.
+        </Alert>
         <Box sx={{ maxWidth: 840, mx: "auto" }}>
           <LinearProgress
             variant="determinate"
@@ -393,7 +418,7 @@ export function StudentAssessments({
             </Box>
           </Card>
         </Box>
-      </>
+      </Box>
     );
   }
   if (!assessments?.length) {

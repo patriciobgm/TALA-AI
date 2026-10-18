@@ -29,6 +29,7 @@ const LearningMaterialsPage = lazy(() => import('./pages/LearningMaterialsPage')
 const StudentCompanionPage = lazy(() => import('./pages/StudentCompanionPage').then(module => ({ default: module.StudentCompanionPage })));
 const EvidenceViewPage = lazy(() => import('./pages/EvidenceViewPage').then(module => ({ default: module.EvidenceViewPage })));
 const StudentEnrollmentPage = lazy(() => import('./pages/StudentEnrollmentPage').then(module => ({ default: module.StudentEnrollmentPage })));
+const PublicDiagnosticPage = lazy(() => import('./pages/PublicDiagnosticPage').then(module => ({ default: module.PublicDiagnosticPage })));
 
 const routePaths: Record<Route, string> = { overview: '/', companion: '/companion', evidence: '/evidence', recovery: '/recovery', materials: '/materials', enrollment: '/enrollment', learners: '/learners', classes: '/classes', assessments: '/assessments', resources: '/subjects', competencies: '/subjects', content: '/imports', notifications: '/notifications', reports: '/reports', research: '/research', settings: '/settings', profile: '/profile' };
 const allowedRoutes: Record<Role, Set<Route>> = {
@@ -83,13 +84,20 @@ export default function App() {
     setRoute('overview'); setLearnerId(null); window.history.replaceState({}, '', '/');
   }, [role, route, user]);
   const openNotificationUrl = useCallback((path: string) => {
-    const learner = path.match(/^\/learners\/(\d+)\/?$/);
+    const target = new URL(path, window.location.origin);
+    const pathname = target.pathname;
+    const learner = pathname.match(/^\/learners\/(\d+)\/?$/);
     if (learner && role !== 'student') { openLearner(Number(learner[1])); return; }
-    const contentImport = path.match(/^\/imports\/(\d+)\/?$/);
-    if (contentImport && role === 'admin') { setContentImportId(Number(contentImport[1])); setRoute('content'); window.history.pushState({}, '', path); return; }
-    const privacyRequest = path.match(/^\/settings\/privacy\/(\d+)\/?$/);
-    if (privacyRequest && role === 'admin') { setPrivacyRequestId(Number(privacyRequest[1])); setRoute('settings'); window.history.pushState({}, '', path); return; }
-    const next = locationStateForPath(path).route;
+    const contentImport = pathname.match(/^\/imports\/(\d+)\/?$/);
+    if (contentImport && role === 'admin') { setContentImportId(Number(contentImport[1])); setRoute('content'); window.history.pushState({}, '', `${pathname}${target.search}`); return; }
+    const privacyRequest = pathname.match(/^\/settings\/privacy\/(\d+)\/?$/);
+    if (privacyRequest && role === 'admin') { setPrivacyRequestId(Number(privacyRequest[1])); setRoute('settings'); window.history.pushState({}, '', `${pathname}${target.search}`); return; }
+    const next = locationStateForPath(pathname).route;
+    if (role === 'admin' && next === 'learners' && target.searchParams.has('view')) {
+      window.history.pushState({}, '', `${pathname}${target.search}`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+      return;
+    }
     if (allowedRoutes[role].has(next)) navigate(next);
   }, [navigate, role]);
   const visibleRoute = user?.must_change_password ? 'profile' : allowedRoutes[role].has(route) ? route : 'overview';
@@ -118,6 +126,7 @@ export default function App() {
   else if (visibleRoute === 'learners') page = <TeacherDashboard onSelectLearner={openLearner} />;
   else page = <TeacherOverview onLearners={() => navigate('learners')} onAssessments={() => navigate('assessments')} onReports={() => navigate('reports')} onLearner={openLearner} />;
 
+  if (window.location.pathname.startsWith('/diagnostic')) return <ThemeProvider theme={roleThemes.student}><Suspense fallback={<Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><CircularProgress size={28} /></Box>}><PublicDiagnosticPage /></Suspense></ThemeProvider>;
   if (checkingSession) return <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><CircularProgress size={28} aria-label="Checking session" /></Box>;
   if (window.location.pathname === '/consent') return <RemedialConsentPage />;
   if (!user && window.location.pathname === '/reset-password') return <ResetPasswordPage />;

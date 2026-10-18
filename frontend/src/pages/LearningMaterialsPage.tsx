@@ -67,11 +67,15 @@ export function LearningMaterialsPage() {
     const focusedQuestion = selected.practice_questions.find(question => question.id === focusedQuestionId);
     setLearningContext({ contextType: 'learning_material', assignmentId: selected.id, competency: selected.competency?.title ?? 'General learning material', activityTitle: selected.resource_title, questionId: focusedQuestion?.id, questionPrompt: focusedQuestion?.prompt, selectedAnswer: focusedQuestion ? quizAnswers[focusedQuestion.id] : undefined, openChat: true });
   };
-  const submitQuiz = async () => {
+  const startQuiz = async () => {
+    if (!selected) throw new Error('Choose a learning material first.');
+    return api<{ session_id: number; expires_at: string }>(`/learning-assignments/${selected.id}/start-quiz/`, { method: 'POST' });
+  };
+  const submitQuiz = async (sessionId: number) => {
     if (!selected) return;
     setBusy(true); setError('');
     try {
-      const result = await api<{ score: number; passed: boolean; required_score: number; assignment: LearningAssignment }>(`/learning-assignments/${selected.id}/submit-quiz/`, { method: 'POST', body: JSON.stringify({ answers: selected.practice_questions.map(question => ({ question_id: question.id, answer: quizAnswers[question.id] })) }) });
+      const result = await api<{ score: number; passed: boolean; required_score: number; assignment: LearningAssignment }>(`/learning-assignments/${selected.id}/submit-quiz/`, { method: 'POST', body: JSON.stringify({ session_id: sessionId, answers: selected.practice_questions.map(question => ({ question_id: question.id, answer: quizAnswers[question.id] ?? '' })) }) });
       setQuizResult(result); replaceAssignment(result.assignment);
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to submit the module quiz.'); }
     finally { setBusy(false); }
@@ -114,6 +118,6 @@ export function LearningMaterialsPage() {
       </DialogContent>
       <DialogActions sx={{ flexWrap: 'wrap', gap: 1, px: { xs: 2, sm: 3 } }}><Button onClick={() => setSelected(null)} disabled={busy}>Close</Button><Button variant="outlined" startIcon={<PsychologyOutlined />} onClick={openMaterialTala}>Ask TALA</Button>{selected.quiz_required ? <Button variant="contained" disabled={busy || selected.quiz_passed} onClick={() => setQuizOpen(true)}>{selected.quiz_passed ? 'Quiz Passed' : 'Take Learning Quiz'}</Button> : <Button variant="contained" startIcon={<CheckOutlined />} onClick={() => void complete()} disabled={busy || Boolean(selected.completed_at)}>{selected.completed_at ? 'Completed' : busy ? 'Saving…' : 'Mark as Completed'}</Button>}</DialogActions>
     </Dialog>}
-    {selected?.quiz_required && <LearningQuizDialog assignment={selected} open={quizOpen} answers={quizAnswers} result={quizResult} busy={busy} onAnswers={setQuizAnswers} onClose={() => setQuizOpen(false)} onSubmit={submitQuiz} onFocusQuestion={setFocusedQuestionId} onAskTala={question => { setFocusedQuestionId(question.id); setLearningContext({ contextType: 'learning_material', assignmentId: selected.id, competency: selected.competency?.title ?? 'General learning material', activityTitle: selected.resource_title, questionId: question.id, questionPrompt: question.prompt, selectedAnswer: quizAnswers[question.id], openChat: true }); }} />}
+    {selected?.quiz_required && <LearningQuizDialog assignment={selected} open={quizOpen} answers={quizAnswers} result={quizResult} busy={busy} onAnswers={setQuizAnswers} onClose={() => setQuizOpen(false)} onStart={startQuiz} onSubmit={submitQuiz} onFocusQuestion={setFocusedQuestionId} onAskTala={question => { setFocusedQuestionId(question.id); setLearningContext({ contextType: 'learning_material', assignmentId: selected.id, competency: selected.competency?.title ?? 'General learning material', activityTitle: selected.resource_title, questionId: question.id, questionPrompt: question.prompt, selectedAnswer: quizAnswers[question.id], openChat: true }); }} />}
   </>;
 }

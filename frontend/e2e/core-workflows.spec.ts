@@ -1,27 +1,29 @@
 import { expect, test } from '@playwright/test';
 
-test('sign-in page exposes normalized learner and teacher registration paths', async ({ page }) => {
+test('sign-in page sends learners to public diagnostics and keeps teacher registration', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
   await expect(page.getByLabel('Email')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Create learner account' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Take diagnostic assessment' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Create teacher account' })).toBeVisible();
 
-  await page.getByRole('button', { name: 'Create learner account' }).click();
-  await expect(page.getByRole('heading', { name: 'Create learner account' })).toBeVisible();
-  await expect(page.getByLabel('LRN')).toBeVisible();
-  await expect(page.getByLabel('Cluster')).toBeVisible();
-  await expect(page.getByLabel('Grade level')).toBeVisible();
-  await expect(page.getByLabel('Section')).toBeVisible();
-  await expect(page.getByLabel('Adviser')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Create account' })).toBeVisible();
-
-  await page.getByRole('button', { name: 'Back to sign in' }).click();
+  await page.getByRole('link', { name: 'Take diagnostic assessment' }).click();
+  await expect(page.getByRole('heading', { name: 'Choose a subject diagnostic' })).toBeVisible();
+  await page.goto('/');
   await page.getByRole('button', { name: 'Create teacher account' }).click();
   await expect(page.getByRole('heading', { name: 'Create teacher account' })).toBeVisible();
   await expect(page.getByLabel('Cluster')).toBeVisible();
   await expect(page.getByLabel('Grade level')).toHaveCount(0);
   await expect(page.getByLabel('Section')).toHaveCount(0);
+});
+
+test('admin cannot manually add a learner outside diagnostic qualification', async ({ page }) => {
+  await page.goto('/learners?view=students');
+  await page.getByLabel('Email').fill('admin@tala.edu.ph');
+  await page.locator('input[type="password"]').fill('demo-password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByText('Learner accounts appear here after a public diagnostic identifies a remediation need.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add Student' })).toHaveCount(0);
 });
 
 test('teacher can sign in and open all five academic recovery reports', async ({ page }) => {

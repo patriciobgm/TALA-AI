@@ -101,7 +101,7 @@ export function AdminUsers({ superadmin, mode = 'users' }: { superadmin: boolean
   const derivedClasses = classes.filter(item => item.is_active && teacherGrades.includes(item.grade_level));
 
   return <>
-    <PageHeader title={isClassTab ? 'Class Management' : 'User & Security Management'} description={isClassTab ? 'Maintain Grade 11 and Grade 12 sections. Teacher class access is derived from assigned subject grades.' : 'Manage identities, account status, recovery, and role-appropriate academic placement.'} action={<Button variant="contained" startIcon={<Add />} onClick={() => isClassTab ? openClass() : openUser()}>{isClassTab ? 'Add Class' : `Add ${roleForTab.charAt(0).toUpperCase()}${roleForTab.slice(1)}`}</Button>} />
+    <PageHeader title={isClassTab ? 'Class Management' : 'User & Security Management'} description={isClassTab ? 'Maintain Grade 11 and Grade 12 sections. Teacher class access is derived from assigned subject grades.' : roleForTab === 'student' ? 'Learner accounts appear here after a public diagnostic identifies a remediation need.' : 'Manage identities, account status, recovery, and role-appropriate academic placement.'} action={!isClassTab && roleForTab === 'student' ? undefined : <Button variant="contained" startIcon={<Add />} onClick={() => isClassTab ? openClass() : openUser()}>{isClassTab ? 'Add Class' : `Add ${roleForTab.charAt(0).toUpperCase()}${roleForTab.slice(1)}`}</Button>} />
     {(error || userTable.error || classTable.error) && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error || userTable.error || classTable.error}</Alert>}
     {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
     {isClassTab && <EnrollmentPanel role="admin" />}

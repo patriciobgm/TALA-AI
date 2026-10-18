@@ -115,56 +115,10 @@ def registration_options(request):
 @permission_classes([AllowAny])
 @throttle_classes([RegistrationThrottle])
 def register_student(request):
-    email = str(request.data.get("email", "")).strip().casefold()
-    name = str(request.data.get("name", "")).strip()
-    password = str(request.data.get("password", ""))
-    lrn = re.sub(r"\s+", "", str(request.data.get("lrn", "")))
-    try:
-        cluster_id = int(request.data.get("cluster"))
-        grade_level = int(request.data.get("grade_level"))
-        section_id = int(request.data.get("section"))
-    except (TypeError, ValueError):
-        return Response({"detail": "Choose a cluster, grade level, and section."}, status=status.HTTP_400_BAD_REQUEST)
-    if not email or "@" not in email:
-        return Response({"email": "Enter a valid email address."}, status=status.HTTP_400_BAD_REQUEST)
-    if len(name.split()) < 2:
-        return Response({"name": "Enter the learner's complete name."}, status=status.HTTP_400_BAD_REQUEST)
-    if not re.fullmatch(r"\d{12}", lrn):
-        return Response({"lrn": "Enter the learner's 12-digit LRN."}, status=status.HTTP_400_BAD_REQUEST)
-    if StudentProfile.objects.filter(learner_reference_number=lrn).exists():
-        return Response({"lrn": "This LRN is already linked to a learner account."}, status=status.HTTP_409_CONFLICT)
-    if get_user_model().objects.filter(username__iexact=email).exists():
-        return Response({"email": "An account with this email already exists."}, status=status.HTTP_409_CONFLICT)
-    cluster = Cluster.objects.filter(pk=cluster_id, is_active=True).first()
-    section = AcademicClass.objects.filter(pk=section_id, grade_level=grade_level, is_active=True).first()
-    if not cluster or grade_level not in {11, 12} or not section:
-        return Response({"detail": "Choose a valid cluster, grade level, and section."}, status=status.HTTP_400_BAD_REQUEST)
-    if section.cluster_id and section.cluster_id != cluster.id:
-        return Response({"section": "Choose a section available for the selected cluster."}, status=status.HTTP_400_BAD_REQUEST)
-    try:
-        validate_password(password)
-    except Exception as exc:
-        return Response({"password": list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
-    first_name, last_name = name.split(maxsplit=1)
-    with transaction.atomic():
-        user = get_user_model().objects.create_user(
-            username=email,
-            email=email,
-            password=password,
-            first_name=first_name,
-            last_name=last_name,
-            is_active=True,
-        )
-        profile = UserProfile.objects.create(
-            user=user,
-            role=UserProfile.Role.STUDENT,
-            academic_class=section,
-            is_active=True,
-        )
-        legacy_cluster = StudentProfile.Cluster.TECH_PRO if cluster.code == "TECH-PRO" else StudentProfile.Cluster.ACADEMICS
-        StudentProfile.objects.create(profile=profile, learner_reference_number=lrn, grade_level=grade_level, cluster=legacy_cluster, cluster_record=cluster)
-        AuditEvent.objects.create(actor=user, action="account.student_registered", object_type="User", object_id=str(user.id), metadata={"cluster_id": cluster.id, "section_id": section.id, "lrn_recorded": True})
-    return Response({"detail": "Account created. Sign in, then enter a subject enrollment code. The assigned teacher will verify each enrollment request."}, status=status.HTTP_201_CREATED)
+    return Response(
+        {"detail": "Learner self-registration is closed. Take a public subject diagnostic; TALA-AI creates an account only when the result identifies a remediation need."},
+        status=status.HTTP_403_FORBIDDEN,
+    )
 
 
 @api_view(["POST"])

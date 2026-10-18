@@ -6,6 +6,8 @@ from pathlib import Path
 from urllib.parse import quote
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
+from django.contrib.auth.password_validation import validate_password
 from django.core import signing
 from django.core.mail import send_mail
 from django.db import connection
@@ -16,14 +18,16 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import permissions, status, viewsets
+from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 
 from .content_imports import ContentImportError, analyze_curriculum_document, process_content_import, publish_content_import, sync_published_practice_questions
 from .learning_intelligence import rank_learning_resources, record_evidence
 from .companion_intelligence import record_question_outcome, update_learning_outcome
-from .models import AIHelpRequest, AIMessage, AIMessageEvaluation, AIRecommendation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Cluster, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GradeLevel, GuardianContact, Intervention, LearnerCompetencyEvidence, LearnerCompetencyState, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningGap, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyRequest, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, SystemConfiguration, Topic, UsabilityEvaluation, UserProfile
+from .models import AIHelpRequest, AIMessage, AIMessageEvaluation, AIRecommendation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Cluster, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GradeLevel, GuardianContact, Intervention, LearnerCompetencyEvidence, LearnerCompetencyState, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningGap, LearningQuizSession, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyRequest, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, SystemConfiguration, Topic, UsabilityEvaluation, UserProfile
 from .assessment_rules import incomplete_prerequisite_assignments, matching_diagnostic_assignments, remedial_student_is_eligible
 from .llm.base import LLMRequest, LLMUnavailable
 from .llm.factory import get_llm_provider
@@ -36,6 +40,9 @@ from .resource_index import index_learning_resource
 from .research_evidence import build_evidence_package, freeze_evidence_package
 from .assignment_rules import sync_teacher_classes
 from .progression_engine import ProgressionDenied, accessible_assessment_competency_ids, apply_competency_result, approved_offering_for, assert_assessment_access, initialize_enrollment_progression
+
+class PublicDiagnosticThrottle(AnonRateThrottle):
+    scope = "registration"
 
 def _range_file_iterator(file_handle, start, length, chunk_size=64 * 1024):
     try:
@@ -969,6 +976,12 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
         questions = list(assignment.resource.practice_questions.all())
         if not questions:
             return Response({"detail": "This module has no extracted quiz."}, status=status.HTTP_409_CONFLICT)
+        session = LearningQuizSession.objects.filter(
+            pk=request.data.get("session_id"), assignment=assignment, student=request.user, submitted_at__isnull=True
+        ).first()
+        if not session:
+            return Response({"detail": "Start the timed learning quiz before submitting answers."}, status=status.HTTP_409_CONFLICT)
+        timed_out = timezone.now() >= session.expires_at
         supplied = request.data.get("answers")
         if not isinstance(supplied, list):
             return Response({"answers": "Expected a list of question answers."}, status=status.HTTP_400_BAD_REQUEST)
@@ -976,12 +989,16 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
             answer_map = {int(item.get("question_id")): str(item.get("answer", "")) for item in supplied if item.get("question_id")}
         except (TypeError, ValueError):
             return Response({"answers": "Question identifiers must be valid integers."}, status=status.HTTP_400_BAD_REQUEST)
-        if set(answer_map) != {question.id for question in questions}:
+        if not timed_out and set(answer_map) != {question.id for question in questions}:
             return Response({"answers": "Answer every module quiz question exactly once."}, status=status.HTTP_400_BAD_REQUEST)
+        if timed_out:
+            answer_map = {question.id: answer_map.get(question.id, "") for question in questions}
         correct = sum(answer_map[question.id].strip().casefold() == question.correct_answer.strip().casefold() for question in questions)
         score = Decimal(correct * 100) / Decimal(len(questions))
         passed = score >= assignment.resource.passing_score
         LearningAssignmentQuizAttempt.objects.create(assignment=assignment, student=request.user, answers=answer_map, score=score, passed=passed)
+        session.submitted_at = timezone.now()
+        session.save(update_fields=["submitted_at"])
         for question in questions:
             record_question_outcome(student=request.user, question=question, correct=answer_map[question.id].strip().casefold() == question.correct_answer.strip().casefold())
         if passed:
@@ -994,7 +1011,27 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
             if progress.completed_at:
                 sync_recovery_activity_completion(request.user, assignment, progress.completed_at)
         assignment = self.get_queryset().get(pk=assignment.pk)
-        return Response({"score": round(float(score), 2), "passed": passed, "required_score": assignment.resource.passing_score, "assignment": self.get_serializer(assignment).data}, status=status.HTTP_201_CREATED)
+        return Response({"score": round(float(score), 2), "passed": passed, "required_score": assignment.resource.passing_score, "timed_out": timed_out, "assignment": self.get_serializer(assignment).data}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="start-quiz")
+    def start_quiz(self, request, pk=None):
+        assignment = self.get_object()
+        if role_for(request.user) != UserProfile.Role.STUDENT:
+            return Response({"detail": "Only students can start learning quizzes."}, status=status.HTTP_403_FORBIDDEN)
+        denied = self._ensure_assignment_access(request, assignment)
+        if denied:
+            return denied
+        if not assignment.resource.practice_questions.exists():
+            return Response({"detail": "This material has no learning quiz."}, status=status.HTTP_409_CONFLICT)
+        now = timezone.now()
+        session = LearningQuizSession.objects.filter(assignment=assignment, student=request.user, submitted_at__isnull=True).order_by("-started_at").first()
+        if session is None or session.expires_at <= now:
+            if session and session.submitted_at is None:
+                session.submitted_at = session.expires_at
+                session.save(update_fields=["submitted_at"])
+            minutes = max(1, min(240, assignment.quiz_time_limit_minutes))
+            session = LearningQuizSession.objects.create(assignment=assignment, student=request.user, started_at=now, expires_at=now + timedelta(minutes=minutes))
+        return Response({"session_id": session.id, "started_at": session.started_at, "expires_at": session.expires_at, "time_limit_minutes": assignment.quiz_time_limit_minutes})
 
 class AssessmentViewSet(viewsets.ModelViewSet):
     queryset = Assessment.objects.select_related("subject", "created_by").prefetch_related("questions", "assigned_classes", "remedial_consents").order_by("title", "id")
@@ -1418,7 +1455,8 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
         if attempt is None:
             attempt = AssessmentAttempt.objects.create(assessment=assessment, student=request.user)
         accessible_ids = None if target_competency_id else accessible_assessment_competency_ids(request.user, assessment, offering)
-        return Response({"attempt_id": attempt.id, "assessment": AssessmentDetailSerializer(assessment, context={"request": request, "target_competency_id": target_competency_id, "target_question_ids": target_question_ids, "accessible_competency_ids": accessible_ids}).data})
+        expires_at = attempt.started_at + timedelta(minutes=assessment.time_limit_minutes)
+        return Response({"attempt_id": attempt.id, "started_at": attempt.started_at, "expires_at": expires_at, "assessment": AssessmentDetailSerializer(assessment, context={"request": request, "target_competency_id": target_competency_id, "target_question_ids": target_question_ids, "accessible_competency_ids": accessible_ids}).data})
 
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
@@ -1464,25 +1502,28 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
                     return Response({"question_ids": "Only the questions missed in your latest mastery attempt can be submitted."}, status=status.HTTP_400_BAD_REQUEST)
                 question_queryset = question_queryset.filter(id__in=requested_question_ids)
         questions = {q.id: q for q in question_queryset}
+        attempt = AssessmentAttempt.objects.filter(assessment=assessment, student=request.user, submitted_at__isnull=True).first()
+        if attempt is None:
+            return Response({"detail": "Start the timed assessment before submitting answers."}, status=status.HTTP_409_CONFLICT)
+        timed_out = timezone.now() >= attempt.started_at + timedelta(minutes=assessment.time_limit_minutes)
         try:
             answer_map = {int(item.get("question_id")): str(item.get("answer", "")).strip() for item in supplied if item.get("question_id")}
         except (TypeError, ValueError):
             return Response({"answers": "Question identifiers must be valid integers."}, status=status.HTTP_400_BAD_REQUEST)
-        if set(answer_map) != set(questions):
+        if not timed_out and set(answer_map) != set(questions):
             return Response({"answers": "Every assessment question must be answered exactly once."}, status=status.HTTP_400_BAD_REQUEST)
-        if any(not answer for answer in answer_map.values()):
+        if not timed_out and any(not answer for answer in answer_map.values()):
             return Response({"answers": "Every assessment question requires an answer."}, status=status.HTTP_400_BAD_REQUEST)
+        if timed_out:
+            answer_map = {question_id: answer_map.get(question_id, "") for question_id in questions}
         oversized = [question.id for question in questions.values() if question.question_type == Question.QuestionType.ESSAY and len(answer_map[question.id]) > question.character_limit]
         if oversized:
             return Response({"answers": f"A short-essay response exceeds its character limit (question {oversized[0]})."}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
-            attempt = AssessmentAttempt.objects.filter(assessment=assessment, student=request.user, submitted_at__isnull=True).first()
-            if attempt is None:
-                attempt = AssessmentAttempt.objects.create(assessment=assessment, student=request.user)
             attempt.answers.all().delete()
             for question_id, answer in answer_map.items():
                 question = questions[question_id]
-                if question.question_type == Question.QuestionType.ESSAY:
+                if question.question_type == Question.QuestionType.ESSAY and not timed_out:
                     StudentAnswer.objects.create(attempt=attempt, question=question, answer=answer)
                 else:
                     is_correct = answer.casefold() == question.correct_answer.strip().casefold()
@@ -1499,7 +1540,9 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
                     notify(recipient=teacher, kind=Notification.Kind.ASSESSMENT_RESULT, title="Short essays need review", message=f"{request.user.get_full_name() or request.user.username} submitted {assessment.title}. Review the short-essay responses to finalize the result.", action_url="/assessments", deduplication_key=f"assessment-attempt:{attempt.id}:teacher:{teacher.id}:pending")
             else:
                 self._finalize_attempt(attempt)
-        return Response(AssessmentAttemptSerializer(attempt).data, status=status.HTTP_201_CREATED)
+        data = AssessmentAttemptSerializer(attempt).data
+        data["timed_out"] = timed_out
+        return Response(data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["get"], url_path="my-attempts")
     def my_attempts(self, request):
@@ -1507,6 +1550,164 @@ Keep wording age-appropriate, avoid trick questions, and do not duplicate a ques
         if subject_id := request.query_params.get("subject"):
             attempts = attempts.filter(assessment__subject_id=subject_id)
         return Response(AssessmentAttemptSerializer(attempts, many=True).data)
+
+
+def _public_assessment(code):
+    return Assessment.objects.filter(
+        public_access_code=code,
+        public_access_enabled=True,
+        is_active=True,
+        kind=Assessment.Kind.PRE,
+        subject__is_active=True,
+    ).select_related("subject").prefetch_related("questions__competency", "assigned_classes__cluster").first()
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def public_diagnostics(request):
+    assessments = Assessment.objects.filter(
+        public_access_enabled=True, is_active=True, kind=Assessment.Kind.PRE, subject__is_active=True
+    ).select_related("subject").prefetch_related("questions", "assigned_classes__cluster").order_by("subject__name", "title")
+    return Response([{
+        "code": assessment.public_access_code,
+        "title": assessment.title,
+        "subject": assessment.subject.name,
+        "subject_code": assessment.subject.code,
+        "grade_level": assessment.subject.grade_level,
+        "question_count": assessment.questions.count(),
+        "time_limit_minutes": assessment.time_limit_minutes,
+        "instructions": assessment.instructions,
+        "sections": [{"id": row.id, "label": str(row), "cluster": row.cluster_id} for row in assessment.assigned_classes.filter(is_active=True)],
+        "clusters": [{"id": row.id, "name": row.name} for row in assessment.subject.clusters.filter(is_active=True)],
+    } for assessment in assessments])
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([PublicDiagnosticThrottle])
+def start_public_diagnostic(request, code):
+    assessment = _public_assessment(code)
+    if not assessment:
+        return Response({"detail": "This public diagnostic is unavailable."}, status=status.HTTP_404_NOT_FOUND)
+    if assessment.questions.filter(question_type=Question.QuestionType.ESSAY).exists():
+        return Response({"detail": "This diagnostic requires teacher-scored questions and cannot be opened publicly."}, status=status.HTTP_409_CONFLICT)
+    name = str(request.data.get("name", "")).strip()
+    email = str(request.data.get("email", "")).strip().casefold()
+    lrn = re.sub(r"\D", "", str(request.data.get("lrn", "")))
+    password = str(request.data.get("password", ""))
+    if len(name.split()) < 2:
+        return Response({"name": "Enter the learner's complete name."}, status=status.HTTP_400_BAD_REQUEST)
+    if "@" not in email:
+        return Response({"email": "Enter a valid email address."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(lrn) != 12:
+        return Response({"lrn": "Enter the learner's 12-digit LRN."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        cluster_id = int(request.data.get("cluster"))
+        section_id = int(request.data.get("section"))
+    except (TypeError, ValueError):
+        return Response({"detail": "Choose an available cluster and section."}, status=status.HTTP_400_BAD_REQUEST)
+    cluster = assessment.subject.clusters.filter(pk=cluster_id, is_active=True).first()
+    section = assessment.assigned_classes.filter(pk=section_id, is_active=True, grade_level=assessment.subject.grade_level).first()
+    if not cluster or not section or (section.cluster_id and section.cluster_id != cluster.id):
+        return Response({"detail": "Choose a cluster and section available for this subject."}, status=status.HTTP_400_BAD_REQUEST)
+    if get_user_model().objects.filter(Q(email__iexact=email) | Q(tala_profile__student_details__learner_reference_number=lrn)).exists():
+        return Response({"detail": "An account already exists for this email or LRN. Sign in to continue assigned recovery work."}, status=status.HTTP_409_CONFLICT)
+    try:
+        validate_password(password)
+    except Exception as exc:
+        return Response({"password": list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+    now = timezone.now()
+    PublicDiagnosticSession.objects.filter(assessment=assessment, learner_reference_number=lrn, submitted_at__isnull=True).update(submitted_at=now)
+    session = PublicDiagnosticSession.objects.create(
+        assessment=assessment,
+        full_name=name,
+        email=email,
+        learner_reference_number=lrn,
+        cluster=cluster,
+        academic_class=section,
+        password_hash=make_password(password),
+        started_at=now,
+        expires_at=now + timedelta(minutes=assessment.time_limit_minutes),
+    )
+    return Response({
+        "session_id": session.id,
+        "started_at": session.started_at,
+        "expires_at": session.expires_at,
+        "assessment": {
+            "title": assessment.title,
+            "subject": assessment.subject.name,
+            "instructions": assessment.instructions,
+            "time_limit_minutes": assessment.time_limit_minutes,
+            "questions": [{"id": q.id, "prompt": q.prompt, "question_type": q.question_type, "options": q.options, "character_limit": q.character_limit} for q in assessment.questions.all()],
+        },
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([PublicDiagnosticThrottle])
+def submit_public_diagnostic(request, code):
+    assessment = _public_assessment(code)
+    if not assessment:
+        return Response({"detail": "This public diagnostic is unavailable."}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        session = PublicDiagnosticSession.objects.get(pk=request.data.get("session_id"), assessment=assessment)
+    except (PublicDiagnosticSession.DoesNotExist, ValueError, TypeError):
+        return Response({"detail": "This diagnostic session is invalid."}, status=status.HTTP_400_BAD_REQUEST)
+    if session.submitted_at:
+        return Response({"detail": "This diagnostic session has already been submitted."}, status=status.HTTP_409_CONFLICT)
+    questions = {item.id: item for item in assessment.questions.select_related("competency")}
+    supplied = request.data.get("answers")
+    if not isinstance(supplied, list):
+        return Response({"answers": "Expected a list of question answers."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        answer_map = {int(item.get("question_id")): str(item.get("answer", "")).strip() for item in supplied if item.get("question_id")}
+    except (TypeError, ValueError):
+        return Response({"answers": "Question identifiers must be valid integers."}, status=status.HTTP_400_BAD_REQUEST)
+    timed_out = timezone.now() >= session.expires_at
+    if not timed_out and (set(answer_map) != set(questions) or any(not value for value in answer_map.values())):
+        return Response({"answers": "Answer every diagnostic question exactly once."}, status=status.HTTP_400_BAD_REQUEST)
+    answer_map = {question_id: answer_map.get(question_id, "") for question_id in questions}
+    grouped = {}
+    for question in questions.values():
+        correct = answer_map[question.id].casefold() == question.correct_answer.strip().casefold()
+        grouped.setdefault(question.competency, []).append(100 if correct else 0)
+    competency_scores = {competency: Decimal(sum(scores)) / Decimal(len(scores)) for competency, scores in grouped.items()}
+    overall_score = Decimal(sum(sum(scores) for scores in grouped.values())) / Decimal(sum(len(scores) for scores in grouped.values())) if grouped else Decimal("0")
+    requires_remediation = any(score < competency.mastery_threshold for competency, score in competency_scores.items())
+    now = timezone.now()
+    with transaction.atomic():
+        session.answers = {str(key): value for key, value in answer_map.items()}
+        session.score = overall_score
+        session.requires_remediation = requires_remediation
+        session.submitted_at = now
+        if not requires_remediation:
+            session.password_hash = ""
+            session.save(update_fields=["answers", "score", "requires_remediation", "submitted_at", "password_hash"])
+            return Response({"score": round(float(overall_score), 2), "requires_remediation": False, "account_created": False, "timed_out": timed_out, "message": "The diagnostic did not identify a current remediation need. No TALA-AI learner account was created."})
+        if get_user_model().objects.filter(Q(email__iexact=session.email) | Q(tala_profile__student_details__learner_reference_number=session.learner_reference_number)).exists():
+            return Response({"detail": "An account was created for this learner in another session. Use the sign-in page or reset the password."}, status=status.HTTP_409_CONFLICT)
+        first_name, last_name = session.full_name.split(maxsplit=1)
+        user = get_user_model()(username=session.email, email=session.email, first_name=first_name, last_name=last_name, is_active=True, password=session.password_hash)
+        user.save()
+        profile = UserProfile.objects.create(user=user, role=UserProfile.Role.STUDENT, academic_class=session.academic_class, is_active=True)
+        legacy_cluster = StudentProfile.Cluster.TECH_PRO if session.cluster.code == "TECH-PRO" else StudentProfile.Cluster.ACADEMICS
+        StudentProfile.objects.create(profile=profile, learner_reference_number=session.learner_reference_number, grade_level=session.academic_class.grade_level, cluster=legacy_cluster, cluster_record=session.cluster)
+        offering = SubjectOffering.objects.filter(subject=assessment.subject, academic_class=session.academic_class, is_active=True).first()
+        if not offering:
+            raise ValidationError("The subject has no active offering for the selected section.")
+        SubjectEnrollment.objects.create(student=user, offering=offering, status=SubjectEnrollment.Status.APPROVED, source=SubjectEnrollment.Source.PUBLIC, requested_by=user, reviewed_by=assessment.created_by, decision_reason="Qualified for academic recovery through the public diagnostic.", reviewed_at=now)
+        attempt = AssessmentAttempt.objects.create(assessment=assessment, student=user, started_at=session.started_at, submitted_at=now, score=overall_score, grading_status=AssessmentAttempt.GradingStatus.AUTO_SCORED)
+        for question_id, answer in answer_map.items():
+            question = questions[question_id]
+            correct = answer.casefold() == question.correct_answer.strip().casefold()
+            StudentAnswer.objects.create(attempt=attempt, question=question, answer=answer, is_correct=correct, score=Decimal("100") if correct else Decimal("0"))
+        AssessmentViewSet()._finalize_attempt(attempt)
+        session.created_user = user
+        session.password_hash = ""
+        session.save(update_fields=["answers", "score", "requires_remediation", "submitted_at", "created_user", "password_hash"])
+        AuditEvent.objects.create(actor=user, action="account.created_from_public_diagnostic", object_type="User", object_id=str(user.id), metadata={"assessment_id": assessment.id, "score": float(overall_score), "lrn_recorded": True})
+    return Response({"score": round(float(overall_score), 2), "requires_remediation": True, "account_created": True, "email": session.email, "timed_out": timed_out, "message": "The diagnostic identified competencies for remediation. Your TALA-AI recovery account is ready."}, status=status.HTTP_201_CREATED)
 
 @api_view(["GET", "POST"])
 @permission_classes([permissions.AllowAny])

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Alert, Box, Button, IconButton, InputAdornment, Link, MenuItem, Stack, TextField, Typography } from '@mui/material';
 import { ArrowBack, CheckCircleOutline, Visibility, VisibilityOff } from '@mui/icons-material';
 import { ApiError } from '../api/client';
-import { getRegistrationOptions, registerStudent, registerTeacher, requestPasswordReset, resetPassword, type RegistrationOptions } from '../api/auth';
+import { getRegistrationOptions, registerTeacher, requestPasswordReset, resetPassword, type RegistrationOptions } from '../api/auth';
 
 type RegistrationMode = 'learner' | 'teacher' | null;
 
@@ -42,17 +42,6 @@ export function LoginPage({ onLogin }: { onLogin: (email: string, password: stri
     try {
       if (forgot) {
         const result = await requestPasswordReset(normalizedEmail);
-        setSuccess(result.detail);
-      } else if (registrationMode === 'learner') {
-        const result = await registerStudent({
-          email: normalizedEmail,
-          password,
-          name: registration.name.trim(),
-          lrn: registration.lrn,
-          cluster: Number(registration.cluster),
-          grade_level: registration.grade_level,
-          section: Number(registration.section),
-        });
         setSuccess(result.detail);
       } else if (registrationMode === 'teacher') {
         const result = await registerTeacher({
@@ -341,10 +330,10 @@ export function LoginPage({ onLogin }: { onLogin: (email: string, password: stri
                       Forgot password?
                     </Button>
                     <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
-                      <Button fullWidth variant="outlined" onClick={() => beginRegistration('learner')}>
-                        Create learner account
+                      <Button fullWidth variant="contained" component="a" href="/diagnostic" sx={{ minHeight: 48, px: 1.5, textAlign: 'center', lineHeight: 1.25, justifyContent: 'center' }}>
+                        Take diagnostic assessment
                       </Button>
-                      <Button fullWidth variant="outlined" onClick={() => beginRegistration('teacher')}>
+                      <Button fullWidth variant="outlined" onClick={() => beginRegistration('teacher')} sx={{ minHeight: 48, px: 1.5, textAlign: 'center', lineHeight: 1.25, justifyContent: 'center' }}>
                         Create teacher account
                       </Button>
                     </Stack>

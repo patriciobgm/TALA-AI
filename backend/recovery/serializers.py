@@ -40,7 +40,7 @@ class SubjectSerializer(serializers.ModelSerializer):
     competency_count = serializers.IntegerField(source="competencies.count", read_only=True)
     class Meta:
         model = Subject
-        fields = ["id", "name", "code", "grade_level", "clusters", "is_active", "competency_count", "curriculum_source_name", "curriculum_analysis_status", "curriculum_analysis", "curriculum_analysis_error", "curriculum_analyzed_at"]
+        fields = ["id", "name", "code", "grade_level", "clusters", "is_active", "assessment_time_limit_minutes", "learning_quiz_time_limit_minutes", "competency_count", "curriculum_source_name", "curriculum_analysis_status", "curriculum_analysis", "curriculum_analysis_error", "curriculum_analyzed_at"]
         read_only_fields = ["curriculum_source_name", "curriculum_analysis_status", "curriculum_analysis", "curriculum_analysis_error", "curriculum_analyzed_at"]
     def validate_grade_level(self, value):
         if value not in {11, 12}:
@@ -187,6 +187,8 @@ class UserAdminSerializer(serializers.Serializer):
         if not self.instance and not attrs.get("password"):
             raise serializers.ValidationError({"password": "A temporary password is required."})
         if role == UserProfile.Role.STUDENT:
+            if not self.instance:
+                raise serializers.ValidationError({"role": "Learner accounts are created only after a public diagnostic identifies a remediation need."})
             existing_student = getattr(getattr(self.instance, "tala_profile", None), "student_details", None)
             lrn = str(attrs.get("learner_reference_number", getattr(existing_student, "learner_reference_number", "") or "")).strip()
             if not self.instance and not re.fullmatch(r"\d{12}", lrn):
@@ -560,7 +562,7 @@ class LearningAssignmentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = LearningAssignment
-        fields = ["id", "resource", "resource_title", "resource_type", "purpose", "resource_content", "original_filename", "competency", "file_url", "uploaded_by_name", "assigned_classes", "subject_offerings", "class_labels", "instructions", "due_at", "is_active", "opened_at", "completed_at", "playback_position_seconds", "duration_seconds", "progress_percent", "practice_questions", "quiz_required", "quiz_passed", "latest_quiz_score", "passing_score", "created_at"]
+        fields = ["id", "resource", "resource_title", "resource_type", "purpose", "resource_content", "original_filename", "competency", "file_url", "uploaded_by_name", "assigned_classes", "subject_offerings", "class_labels", "instructions", "due_at", "quiz_time_limit_minutes", "is_active", "opened_at", "completed_at", "playback_position_seconds", "duration_seconds", "progress_percent", "practice_questions", "quiz_required", "quiz_passed", "latest_quiz_score", "passing_score", "created_at"]
         read_only_fields = fields
 
 class AssessmentSerializer(serializers.ModelSerializer):
@@ -680,6 +682,12 @@ class AssessmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"assigned_classes": "Assign at least one class before activation."})
             if not self.instance.questions.exists():
                 raise serializers.ValidationError({"is_active": "Add at least one question before activation."})
+            public_enabled = attrs.get("public_access_enabled", self.instance.public_access_enabled)
+            kind = attrs.get("kind", self.instance.kind)
+            if public_enabled and kind != Assessment.Kind.PRE:
+                raise serializers.ValidationError({"public_access_enabled": "Only diagnostic assessments can use a public access page."})
+            if public_enabled and self.instance.questions.filter(question_type=Question.QuestionType.ESSAY).exists():
+                raise serializers.ValidationError({"public_access_enabled": "Public diagnostics cannot contain manually scored short essays."})
         prerequisites = attrs.get("prerequisite_assignments")
         kind = attrs.get("kind", getattr(self.instance, "kind", Assessment.Kind.PRE))
         subject = attrs.get("subject", getattr(self.instance, "subject", None))
@@ -693,8 +701,13 @@ class AssessmentSerializer(serializers.ModelSerializer):
         return attrs
     class Meta:
         model = Assessment
-        fields = ["id", "title", "subject", "topic", "subject_offerings", "kind", "instructions", "due_at", "is_active", "available", "availability_reason", "remaining_activities", "remaining_prerequisites", "prerequisite_statuses", "consent_status", "created_by", "question_count", "competency_ids", "assigned_classes", "prerequisite_assignments"]
-        read_only_fields = ["created_by"]
+        fields = ["id", "title", "subject", "topic", "subject_offerings", "kind", "instructions", "due_at", "time_limit_minutes", "public_access_enabled", "public_access_code", "is_active", "available", "availability_reason", "remaining_activities", "remaining_prerequisites", "prerequisite_statuses", "consent_status", "created_by", "question_count", "competency_ids", "assigned_classes", "prerequisite_assignments"]
+        read_only_fields = ["created_by", "public_access_code"]
+
+    def validate_time_limit_minutes(self, value):
+        if not 1 <= value <= 240:
+            raise serializers.ValidationError("Set a time limit from 1 to 240 minutes.")
+        return value
 
 class QuestionPublicSerializer(serializers.ModelSerializer):
     class Meta:
@@ -766,7 +779,7 @@ class AssessmentAttemptSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AssessmentAttempt
-        fields = ["id", "assessment", "student", "submitted_at", "score", "grading_status", "reviewed_at", "competency_results", "incorrect_question_ids"]
+        fields = ["id", "assessment", "student", "started_at", "submitted_at", "score", "grading_status", "reviewed_at", "competency_results", "incorrect_question_ids"]
 
 class RecoveryActivitySerializer(serializers.ModelSerializer):
     resource_title = serializers.CharField(source="resource.title", read_only=True)

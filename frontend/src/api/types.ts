@@ -38,11 +38,11 @@ export interface ApiActivity {
 
 export interface ApiPlan { id: number; student: number; competency: number; competency_title: string; baseline_score: string; trigger_status: string; trigger_attempt: number | null; status: string; created_at: string; activities: ApiActivity[]; mastery_assessment: { id: number; title: string; available: boolean; remaining_activities: number; availability_reason: string } | null }
 export interface CompetencyResult { id: number; competency: number; competency_title: string; subject: number; subject_name: string; score: string; status: string }
-export interface AssessmentAttempt { id: number; assessment: number; student: number; submitted_at: string; score: string | null; grading_status: 'auto_scored' | 'pending_review' | 'teacher_scored'; reviewed_at: string | null; competency_results: CompetencyResult[]; incorrect_question_ids: number[] }
+export interface AssessmentAttempt { id: number; assessment: number; student: number; started_at: string; submitted_at: string; score: string | null; grading_status: 'auto_scored' | 'pending_review' | 'teacher_scored'; reviewed_at: string | null; competency_results: CompetencyResult[]; incorrect_question_ids: number[] }
 export interface StudentDashboardData { academic_class: { id: number; label: string; subject_name: string | null; class_code: string | null } | null; mastered: number; total_competencies: number; plans: ApiPlan[]; attempts: AssessmentAttempt[]; pending_diagnostic: { id: number; title: string; question_count: number; due_at: string | null; remaining_prerequisites: number; prerequisite_titles: string[] } | null }
 export interface ApiQuestion { id: number; competency: number; competency_title?: string; prompt: string; question_type: 'mcq' | 'tf' | 'short' | 'essay'; options: string[]; correct_answer?: string; character_limit: number; misconceptions?: number[] }
 export interface PrerequisiteStatus { assignment_id: number; title: string; resource_type: string; opened: boolean; completed: boolean; watched_percent: number; quiz_required: boolean; quiz_score: number | null; quiz_passed: boolean; passing_score: number }
-export interface ApiAssessment { id: number; title: string; subject: number; kind: 'pre' | 'post' | 'remedial'; instructions: string; due_at: string | null; is_active: boolean; available: boolean; availability_reason: string; remaining_activities: number; remaining_prerequisites: number; prerequisite_statuses: PrerequisiteStatus[]; consent_status?: string; assigned_classes: number[]; prerequisite_assignments: number[]; created_by: number; question_count: number; competency_ids: number[]; questions?: ApiQuestion[] }
+export interface ApiAssessment { id: number; title: string; subject: number; kind: 'pre' | 'post' | 'remedial'; instructions: string; due_at: string | null; time_limit_minutes: number; public_access_enabled: boolean; public_access_code: string | null; is_active: boolean; available: boolean; availability_reason: string; remaining_activities: number; remaining_prerequisites: number; prerequisite_statuses: PrerequisiteStatus[]; consent_status?: string; assigned_classes: number[]; prerequisite_assignments: number[]; created_by: number; question_count: number; competency_ids: number[]; questions?: ApiQuestion[] }
 export interface ApiLearner { id: number; name: string; email: string; section: string; progress: number; gaps: number; assessment: number | null; status: 'On track' | 'Monitor' | 'Intervention' }
 export interface MaterialAnalytics {
   summary: { materials: number; assigned_learners: number; in_progress: number; completed: number; quiz_passed: number };
@@ -56,7 +56,7 @@ export interface LearnerDetail { student: { id: number; name: string; email: str
 
 export interface ApiCluster { id: number; name: string; code: string; description: string; is_active: boolean; subject_count: number }
 export interface CurriculumProposal { topics?: { code: string; title: string; description: string; competencies: { code: string; title: string }[] }[]; source_character_count?: number; provider?: string; model?: string }
-export interface ApiSubject { id: number; name: string; code: string; grade_level: number; clusters: number[]; is_active: boolean; competency_count: number; curriculum_source_name: string; curriculum_analysis_status: 'not_uploaded' | 'processing' | 'ready' | 'applied' | 'failed'; curriculum_analysis: CurriculumProposal; curriculum_analysis_error: string; curriculum_analyzed_at: string | null }
+export interface ApiSubject { id: number; name: string; code: string; grade_level: number; clusters: number[]; is_active: boolean; assessment_time_limit_minutes: number; learning_quiz_time_limit_minutes: number; competency_count: number; curriculum_source_name: string; curriculum_analysis_status: 'not_uploaded' | 'processing' | 'ready' | 'applied' | 'failed'; curriculum_analysis: CurriculumProposal; curriculum_analysis_error: string; curriculum_analyzed_at: string | null }
 export interface ApiTopic { id: number; subject: number; code: string; title: string; description: string; sequence_order: number; prerequisites: number[]; is_active: boolean; competency_count: number }
 export interface ApiCompetency { id: number; subject: number; topic: number | null; code: string; title: string; sequence_order: number; prerequisites: number[]; mastery_threshold: number; is_active: boolean }
 export interface ApiClass { id: number; name: string; grade_level: number; grade_level_record?: number | null; cluster?: number | null; adviser?: number | null; school_year: string; is_active: boolean; class_code: string | null; label: string; student_count: number; teacher_count: number }
@@ -119,6 +119,7 @@ export interface LearningAssignment {
   class_labels: string[];
   instructions: string;
   due_at: string | null;
+  quiz_time_limit_minutes: number;
   is_active: boolean;
   opened_at: string | null;
   completed_at: string | null;

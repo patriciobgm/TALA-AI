@@ -450,6 +450,7 @@ def publish_content_import(content_import, reviewer):
             kind=content_import.configuration.get("assessment_kind", Assessment.Kind.PRE),
             instructions=content_import.configuration.get("instructions", ""),
             due_at=content_import.configuration.get("due_at") or None,
+            time_limit_minutes=max(1, min(240, int(content_import.configuration.get("time_limit_minutes") or content_import.subject.assessment_time_limit_minutes))),
             is_active=False,
             created_by=reviewer,
         )
@@ -487,7 +488,7 @@ def publish_content_import(content_import, reviewer):
         content_import.published_resource = resource
         class_ids = content_import.configuration.get("assigned_class_ids", [])
         if class_ids:
-            assignment = LearningAssignment.objects.create(resource=resource, assigned_by=content_import.uploaded_by, instructions=content_import.configuration.get("instructions", ""), due_at=content_import.configuration.get("due_at") or None)
+            assignment = LearningAssignment.objects.create(resource=resource, assigned_by=content_import.uploaded_by, instructions=content_import.configuration.get("instructions", ""), due_at=content_import.configuration.get("due_at") or None, quiz_time_limit_minutes=max(1, min(240, int(content_import.configuration.get("quiz_time_limit_minutes") or content_import.subject.learning_quiz_time_limit_minutes))))
             assignment.assigned_classes.set(class_ids)
             offerings = SubjectOffering.objects.filter(subject=content_import.subject, academic_class_id__in=class_ids, is_active=True)
             assignment.subject_offerings.set(offerings)

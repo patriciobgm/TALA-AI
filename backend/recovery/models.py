@@ -2,6 +2,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 import secrets
+import uuid
 
 
 def generate_class_code():
@@ -10,6 +11,10 @@ def generate_class_code():
 
 def generate_enrollment_code():
     return f"SUB-{secrets.token_hex(4).upper()}"
+
+
+def generate_public_assessment_code():
+    return f"DIA-{secrets.token_hex(5).upper()}"
 
 
 class Cluster(models.Model):
@@ -171,6 +176,8 @@ class Subject(models.Model):
     grade_level = models.PositiveSmallIntegerField(default=11)
     clusters = models.ManyToManyField(Cluster, related_name="subjects", blank=True)
     is_active = models.BooleanField(default=True)
+    assessment_time_limit_minutes = models.PositiveSmallIntegerField(default=30)
+    learning_quiz_time_limit_minutes = models.PositiveSmallIntegerField(default=10)
     curriculum_source_file = models.FileField(upload_to="curriculum-sources/%Y/%m/", null=True, blank=True)
     curriculum_source_name = models.CharField(max_length=255, blank=True)
     curriculum_analysis_status = models.CharField(max_length=16, default="not_uploaded")
@@ -256,6 +263,7 @@ class SubjectEnrollment(models.Model):
         STUDENT = "student", "Learner request"
         TEACHER = "teacher", "Teacher enrollment"
         ADMIN = "admin", "Administrator override"
+        PUBLIC = "public", "Public diagnostic qualification"
         MIGRATION = "migration", "Migrated record"
 
     student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="subject_enrollments", on_delete=models.CASCADE)
@@ -321,6 +329,7 @@ class LearningAssignment(models.Model):
     subject_offerings = models.ManyToManyField(SubjectOffering, related_name="learning_assignments", blank=True)
     instructions = models.TextField(blank=True)
     due_at = models.DateTimeField(null=True, blank=True)
+    quiz_time_limit_minutes = models.PositiveSmallIntegerField(default=10)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -350,6 +359,17 @@ class LearningAssignmentQuizAttempt(models.Model):
 
     class Meta:
         ordering = ["-submitted_at", "-id"]
+
+
+class LearningQuizSession(models.Model):
+    assignment = models.ForeignKey(LearningAssignment, related_name="quiz_sessions", on_delete=models.CASCADE)
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="learning_quiz_sessions", on_delete=models.CASCADE)
+    started_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-started_at", "-id"]
 
 class PracticeQuestion(models.Model):
     class QuestionType(models.TextChoices):
@@ -383,9 +403,19 @@ class Assessment(models.Model):
     is_active = models.BooleanField(default=False)
     instructions = models.TextField(blank=True)
     due_at = models.DateTimeField(null=True, blank=True)
+    time_limit_minutes = models.PositiveSmallIntegerField(default=30)
+    public_access_enabled = models.BooleanField(default=False)
+    public_access_code = models.CharField(max_length=20, unique=True, null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     assigned_classes = models.ManyToManyField(AcademicClass, related_name="assessments", blank=True)
     prerequisite_assignments = models.ManyToManyField(LearningAssignment, related_name="prerequisite_for_assessments", blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.public_access_code:
+            self.public_access_code = generate_public_assessment_code()
+            while Assessment.objects.filter(public_access_code=self.public_access_code).exclude(pk=self.pk).exists():
+                self.public_access_code = generate_public_assessment_code()
+        super().save(*args, **kwargs)
 
 class Question(models.Model):
     class QuestionType(models.TextChoices):
@@ -430,11 +460,33 @@ class AssessmentAttempt(models.Model):
 
     assessment = models.ForeignKey(Assessment, on_delete=models.PROTECT)
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    started_at = models.DateTimeField(default=timezone.now)
     submitted_at = models.DateTimeField(null=True, blank=True)
     score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     grading_status = models.CharField(max_length=16, choices=GradingStatus.choices, default=GradingStatus.AUTO_SCORED)
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="reviewed_assessment_attempts", on_delete=models.PROTECT)
     reviewed_at = models.DateTimeField(null=True, blank=True)
+
+
+class PublicDiagnosticSession(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    assessment = models.ForeignKey(Assessment, related_name="public_sessions", on_delete=models.PROTECT)
+    full_name = models.CharField(max_length=180)
+    email = models.EmailField()
+    learner_reference_number = models.CharField(max_length=12)
+    cluster = models.ForeignKey(Cluster, related_name="public_diagnostic_sessions", on_delete=models.PROTECT)
+    academic_class = models.ForeignKey(AcademicClass, related_name="public_diagnostic_sessions", on_delete=models.PROTECT)
+    password_hash = models.CharField(max_length=256)
+    answers = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    requires_remediation = models.BooleanField(null=True, blank=True)
+    created_user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="originating_public_diagnostics", on_delete=models.SET_NULL)
+
+    class Meta:
+        ordering = ["-started_at"]
 
 class RemedialExamConsent(models.Model):
     class Status(models.TextChoices):
