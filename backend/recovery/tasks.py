@@ -1,6 +1,7 @@
 import json
 from datetime import timedelta
 from urllib import request as urlrequest
+from urllib.parse import urljoin
 
 from celery import shared_task
 from django.conf import settings
@@ -86,7 +87,12 @@ def dispatch_notification_delivery(self, delivery_id):
     recipient = notification.recipient
     try:
         if delivery.channel == NotificationDelivery.Channel.EMAIL:
-            send_mail(notification.title, notification.message, settings.DEFAULT_FROM_EMAIL, [recipient.email], fail_silently=False)
+            body = notification.message
+            if notification.action_url:
+                action_url = urljoin(f"{settings.FRONTEND_URL.rstrip('/')}/", notification.action_url.lstrip("/"))
+                body = f"{body}\n\nOpen TALA-AI:\n{action_url}"
+            body = f"{body}\n\nThis is an automated notification from TALA-AI."
+            send_mail(notification.title, body, settings.DEFAULT_FROM_EMAIL, [recipient.email], fail_silently=False)
         else:
             tokens = list(recipient.devices.filter(is_active=True).values_list("push_token", flat=True))
             if not tokens:

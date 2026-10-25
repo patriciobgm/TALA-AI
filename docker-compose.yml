@@ -54,6 +54,13 @@ services:
       SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-false}
       DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-TALA-AI <noreply@localhost>}
       EMAIL_BACKEND: ${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
+      EMAIL_HOST: ${EMAIL_HOST:-}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-true}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-false}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-20}
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles

@@ -114,17 +114,21 @@ export function ProfilePage({ onPasswordChanged }: { onPasswordChanged: () => vo
           : [];
       const updated = await api<Profile>('/auth/profile/', {
         method: 'PATCH',
-        body: JSON.stringify({
-          name,
-          preferred_name: details.preferred_name,
-          gender: details.gender,
-          phone: details.phone,
-          address_line: details.address_line,
-          city_municipality: details.city_municipality,
-          province: details.province,
-          postal_code: details.postal_code,
-          emergency_contacts,
-        }),
+        body: JSON.stringify(
+          profile?.role === 'admin'
+            ? { name, preferred_name: details.preferred_name }
+            : {
+                name,
+                preferred_name: details.preferred_name,
+                gender: details.gender,
+                phone: details.phone,
+                address_line: details.address_line,
+                city_municipality: details.city_municipality,
+                province: details.province,
+                postal_code: details.postal_code,
+                emergency_contacts,
+              },
+        ),
       });
       setProfile(updated);
       setSuccess('Profile updated.');
@@ -205,7 +209,7 @@ export function ProfilePage({ onPasswordChanged }: { onPasswordChanged: () => vo
 
   return (
     <>
-      <PageHeader title="Account & security" description="Manage your contact details, emergency contact, password, sign-in protection, and privacy requests." />
+      <PageHeader title="Account & security" description={profile?.role === 'admin' ? 'Manage your administrator profile, password, sign-in protection, and privacy requests.' : 'Manage your contact details, emergency contact, password, sign-in protection, and privacy requests.'} />
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
           {error}
@@ -225,7 +229,7 @@ export function ProfilePage({ onPasswordChanged }: { onPasswordChanged: () => vo
           },
           gap: 3,
           alignItems: 'start',
-          maxWidth: 1120,
+          width: '100%',
         }}
       >
         <Stack gap={3}>
@@ -247,7 +251,7 @@ export function ProfilePage({ onPasswordChanged }: { onPasswordChanged: () => vo
               <Box
                 sx={{
                   display: 'grid',
-                  gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
+                  gridTemplateColumns: { xs: '1fr', sm: profile?.role === 'admin' ? 'repeat(3, minmax(0, 1fr))' : '1fr 1fr' },
                   gap: 2,
                 }}
               >
@@ -262,38 +266,40 @@ export function ProfilePage({ onPasswordChanged }: { onPasswordChanged: () => vo
                     }))
                   }
                 />
-                <TextField label="School email" value={profile?.email ?? ''} disabled />
-                <TextField label={profile?.role === 'student' ? 'LRN' : 'Employee ID'} value={profile?.identifier ?? ''} disabled />
-                <TextField label="Date of birth" type="date" value={profile?.date_of_birth ?? ''} disabled InputLabelProps={{ shrink: true }} helperText="Managed by the school." />
-                <TextField
-                  select
-                  label="Gender (optional)"
-                  value={details.gender}
-                  onChange={(event) =>
-                    setDetails((value) => ({
-                      ...value,
-                      gender: event.target.value,
-                    }))
-                  }
-                >
-                  <MenuItem value="">Prefer not to say</MenuItem>
-                  <MenuItem value="female">Female</MenuItem>
-                  <MenuItem value="male">Male</MenuItem>
-                  <MenuItem value="nonbinary">Non-binary</MenuItem>
-                  <MenuItem value="self-described">Self-described</MenuItem>
-                </TextField>
-                <TextField
-                  label="Contact number"
-                  value={details.phone}
-                  onChange={(event) =>
-                    setDetails((value) => ({
-                      ...value,
-                      phone: event.target.value,
-                    }))
-                  }
-                />
+                <TextField label={profile?.role === 'admin' ? 'Email' : 'School email'} value={profile?.email ?? ''} disabled />
+                {profile?.role !== 'admin' && <>
+                  <TextField label={profile?.role === 'student' ? 'LRN' : 'Employee ID'} value={profile?.identifier ?? ''} disabled />
+                  <TextField label="Date of birth" type="date" value={profile?.date_of_birth ?? ''} disabled InputLabelProps={{ shrink: true }} helperText="Managed by the school." />
+                  <TextField
+                    select
+                    label="Gender (optional)"
+                    value={details.gender}
+                    onChange={(event) =>
+                      setDetails((value) => ({
+                        ...value,
+                        gender: event.target.value,
+                      }))
+                    }
+                  >
+                    <MenuItem value="">Prefer not to say</MenuItem>
+                    <MenuItem value="female">Female</MenuItem>
+                    <MenuItem value="male">Male</MenuItem>
+                    <MenuItem value="nonbinary">Non-binary</MenuItem>
+                    <MenuItem value="self-described">Self-described</MenuItem>
+                  </TextField>
+                  <TextField
+                    label="Contact number"
+                    value={details.phone}
+                    onChange={(event) =>
+                      setDetails((value) => ({
+                        ...value,
+                        phone: event.target.value,
+                      }))
+                    }
+                  />
+                </>}
               </Box>
-              <TextField
+              {profile?.role !== 'admin' && <><TextField
                 label="Address"
                 value={details.address_line}
                 onChange={(event) =>
@@ -391,7 +397,7 @@ export function ProfilePage({ onPasswordChanged }: { onPasswordChanged: () => vo
                     }))
                   }
                 />
-              </Box>
+              </Box></>}
               <Box>
                 <Button variant="contained" onClick={saveProfile}>
                   Save changes

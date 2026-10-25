@@ -5,8 +5,6 @@ from .models import Notification, NotificationDelivery, UserProfile
 
 def notify(*, recipient, kind, title, message, action_url="", deduplication_key=""):
     preference = getattr(recipient, "notification_preference", None)
-    if preference and not preference.in_app_enabled:
-        return None
     notification, _ = Notification.objects.get_or_create(
         recipient=recipient,
         deduplication_key=deduplication_key,
@@ -23,8 +21,10 @@ def notify(*, recipient, kind, title, message, action_url="", deduplication_key=
         message=message,
         action_url=action_url,
     ), True)
-    preference = getattr(recipient, "notification_preference", None)
-    if preference and preference.email_enabled and recipient.email:
+    profile = getattr(recipient, "tala_profile", None)
+    email_enabled_by_default = bool(profile and profile.role in {UserProfile.Role.STUDENT, UserProfile.Role.TEACHER})
+    email_enabled = preference.email_enabled if preference else email_enabled_by_default
+    if email_enabled and recipient.email:
         NotificationDelivery.objects.get_or_create(notification=notification, channel=NotificationDelivery.Channel.EMAIL)
     if (preference is None or preference.push_enabled) and recipient.devices.filter(is_active=True).exists():
         NotificationDelivery.objects.get_or_create(notification=notification, channel=NotificationDelivery.Channel.PUSH)

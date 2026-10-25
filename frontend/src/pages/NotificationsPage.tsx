@@ -6,7 +6,7 @@ import type { ApiNotification } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
 
 type Preferences = { in_app_enabled: boolean; email_enabled: boolean; push_enabled: boolean; reminders_enabled: boolean; quiet_hours_start: string | null; quiet_hours_end: string | null };
-const defaults: Preferences = { in_app_enabled: true, email_enabled: false, push_enabled: true, reminders_enabled: true, quiet_hours_start: null, quiet_hours_end: null };
+const defaults: Preferences = { in_app_enabled: true, email_enabled: true, push_enabled: true, reminders_enabled: true, quiet_hours_start: null, quiet_hours_end: null };
 
 export function NotificationsPage({ onOpenUrl }: { onOpenUrl: (url: string) => void }) {
   const [items, setItems] = useState<ApiNotification[] | null>(null);

@@ -27,7 +27,7 @@ from rest_framework.throttling import AnonRateThrottle
 from .content_imports import ContentImportError, analyze_curriculum_document, process_content_import, publish_content_import, sync_published_practice_questions
 from .learning_intelligence import rank_learning_resources, record_evidence
 from .companion_intelligence import record_question_outcome, update_learning_outcome
-from .models import AIHelpRequest, AIMessage, AIMessageEvaluation, AIRecommendation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Cluster, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GradeLevel, GuardianContact, Intervention, LearnerCompetencyEvidence, LearnerCompetencyState, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningGap, LearningQuizSession, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyRequest, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, SystemConfiguration, Topic, UsabilityEvaluation, UserProfile
+from .models import AIHelpRequest, AIMessage, AIMessageEvaluation, AIRecommendation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Cluster, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GradeLevel, GuardianContact, Intervention, LearnerCompetencyEvidence, LearnerCompetencyState, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningGap, LearningQuizSession, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyAcknowledgment, PrivacyRequest, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, SystemConfiguration, Topic, UsabilityEvaluation, UserProfile
 from .assessment_rules import incomplete_prerequisite_assignments, matching_diagnostic_assignments, remedial_student_is_eligible
 from .llm.base import LLMRequest, LLMUnavailable
 from .llm.factory import get_llm_provider
@@ -2658,3 +2658,37 @@ def notification_preferences(request):
         serializer.is_valid(raise_exception=True)
         serializer.save()
     return Response(NotificationPreferenceSerializer(preference).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def privacy_acknowledgments(request):
+    configuration = SystemConfiguration.load()
+    students = get_user_model().objects.filter(tala_profile__role=UserProfile.Role.STUDENT).select_related("tala_profile__academic_class").order_by("last_name", "first_name", "email")
+    acknowledgments = {
+        item.user_id: item
+        for item in PrivacyAcknowledgment.objects.filter(
+            user__in=students,
+            policy_version=configuration.privacy_notice_version,
+        ).select_related("user")
+    }
+    results = []
+    for student in students:
+        acknowledgment = acknowledgments.get(student.id)
+        results.append({
+            "user_id": student.id,
+            "name": student.get_full_name() or student.email,
+            "email": student.email,
+            "class_name": str(student.tala_profile.academic_class) if student.tala_profile.academic_class else "Not assigned",
+            "status": "acknowledged" if acknowledgment else "pending",
+            "policy_version": acknowledgment.policy_version if acknowledgment else configuration.privacy_notice_version,
+            "accepted_at": acknowledgment.accepted_at if acknowledgment else None,
+        })
+    acknowledged_count = len(acknowledgments)
+    return Response({
+        "policy_version": configuration.privacy_notice_version,
+        "total_students": len(results),
+        "acknowledged": acknowledged_count,
+        "pending": len(results) - acknowledged_count,
+        "results": results,
+    })

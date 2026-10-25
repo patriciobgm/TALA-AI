@@ -1046,7 +1046,7 @@ class Notification(models.Model):
 class NotificationPreference(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, related_name="notification_preference", on_delete=models.CASCADE)
     in_app_enabled = models.BooleanField(default=True)
-    email_enabled = models.BooleanField(default=False)
+    email_enabled = models.BooleanField(default=True)
     push_enabled = models.BooleanField(default=True)
     reminders_enabled = models.BooleanField(default=True)
     quiet_hours_start = models.TimeField(null=True, blank=True)
@@ -1112,7 +1112,7 @@ class SystemConfiguration(models.Model):
     minor_data_retention_days = models.PositiveIntegerField(default=1825)
     privacy_contact_email = models.EmailField(blank=True)
     privacy_notice_version = models.CharField(max_length=40, default="TALA-PRIVACY-1")
-    privacy_notice_text = models.TextField(default="I acknowledge that TALA-AI records my account details, learning activities, assessment results, and recovery progress for the school's ARAL academic support program. I understand that I may contact the school to request access or correction of my information.")
+    privacy_notice_text = models.TextField(default="I freely consent to TALA-AI collecting and processing my account information, class and subject enrollment, learning activities, assessment results, and academic recovery progress for the school's ARAL learning-support program. I understand that access is limited to authorized school personnel, that my information will be retained according to school policy, and that I may contact the school to request access, correction, or other applicable privacy rights.")
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     updated_at = models.DateTimeField(auto_now=True)
 

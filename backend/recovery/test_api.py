@@ -4,7 +4,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.core import signing
+from django.core import mail, signing
 from django.core.cache import cache
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -19,11 +19,12 @@ from .account_security import _totp
 from .content_imports import _extract_pdf, generate_grounded_practice_questions, parse_module_questions
 from .learning_intelligence import rank_learning_resources
 from .llm.base import LLMResponse, LLMUnavailable
-from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EmployeeProfile, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, PrivacyAcknowledgment, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, Topic, UserProfile
+from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EmployeeProfile, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, NotificationDelivery, NotificationPreference, PrivacyAcknowledgment, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, Topic, UserProfile
 from .services import create_recovery_plan
 from .progression_engine import apply_competency_result
 from .companion_intelligence import record_question_outcome
-from .tasks import generate_inactivity_reminders
+from .notifications import notify
+from .tasks import dispatch_notification_delivery, generate_inactivity_reminders
 
 class RecoveryApiTests(APITestCase):
     @classmethod
@@ -201,6 +202,34 @@ References
         student = get_user_model().objects.get(username="student@tala.edu.ph")
         self.assertTrue(PrivacyAcknowledgment.objects.filter(user=student, policy_version=current.data["policy_version"]).exists())
         self.assertFalse(self.client.get("/api/auth/me/").data["privacy_acknowledgment_required"])
+
+    def test_admin_can_review_current_learner_privacy_consent_registry(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        self.authenticate()
+        self.client.post("/api/auth/privacy-acknowledgment/", {"accepted": True}, format="json")
+        self.authenticate("admin@tala.edu.ph")
+        response = self.client.get("/api/privacy/acknowledgments/")
+        self.assertEqual(response.status_code, 200, response.data)
+        record = next(item for item in response.data["results"] if item["user_id"] == student.id)
+        self.assertEqual(record["status"], "acknowledged")
+        self.assertIsNotNone(record["accepted_at"])
+        self.assertEqual(response.data["acknowledged"] + response.data["pending"], response.data["total_students"])
+        self.authenticate()
+        self.assertEqual(self.client.get("/api/privacy/acknowledgments/").status_code, 403)
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend", DEFAULT_FROM_EMAIL="TALA-AI <verified@example.com>", FRONTEND_URL="https://tala.example.com")
+    def test_student_and_teacher_notifications_create_and_send_email_delivery(self):
+        student = get_user_model().objects.get(username="student@tala.edu.ph")
+        teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
+        for recipient in (student, teacher):
+            NotificationPreference.objects.filter(user=recipient).delete()
+            notification = notify(recipient=recipient, kind=Notification.Kind.INTERVENTION, title="TALA update", message="A learning update is available.", action_url="/recovery", deduplication_key=f"email-test:{recipient.id}")
+            delivery = NotificationDelivery.objects.get(notification=notification, channel=NotificationDelivery.Channel.EMAIL)
+            self.assertEqual(dispatch_notification_delivery.run(delivery.id), "sent")
+            delivery.refresh_from_db()
+            self.assertEqual(delivery.status, NotificationDelivery.Status.SENT)
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertTrue(all("https://tala.example.com/recovery" in message.body for message in mail.outbox))
 
     def test_student_profile_displays_class_and_cluster_assignment(self):
         self.authenticate()
