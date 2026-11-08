@@ -22,6 +22,11 @@ class OpenAICompatibleProvider:
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         payload = {"model": self.model, "messages": [{"role": "system", "content": request.system}, *request.messages], "temperature": request.temperature, "max_tokens": request.max_tokens, "stream": False}
+        if self.name == "llama_cpp":
+            # Long curriculum and quiz prompts must not restore a nearly-full
+            # server-side KV state from a previous request.
+            payload["cache_prompt"] = False
+            payload["seed"] = 42
         data = self._request("/chat/completions", payload)
         try:
             text = data["choices"][0]["message"]["content"]

@@ -153,18 +153,21 @@ def analyze_curriculum_document(file_obj, filename, subject):
     response = get_llm_provider().generate(LLMRequest(
         system=(
             "You organize approved Philippine senior-high curriculum documents. Return JSON only. "
-            "Use only the supplied document; do not invent outcomes. Produce at most 12 topics and at most "
-            "10 concise competencies per topic. Schema: "
+            "Use only the supplied document; do not invent outcomes. Produce at most 8 representative topics "
+            "and at most 4 concise competencies per topic. Keep topic titles and competency titles under 14 words, "
+            "and each description under 24 words so the complete JSON is never truncated. Schema: "
             '{"topics":[{"code":"T1","title":"...","description":"...","competencies":[{"code":"C1","title":"..."}]}]}'
         ),
-        messages=[{"role": "user", "content": f"Subject: {subject.code} - {subject.name}\n\nDOCUMENT:\n{_balanced_source_excerpt(text, 12000)}"}],
-        temperature=0.1,
-        max_tokens=2200,
+        # Keep the prompt plus response comfortably inside the 4,096-token
+        # context used by the supported local llama.cpp setup.
+        messages=[{"role": "user", "content": f"Subject: {subject.code} - {subject.name}\n\nDOCUMENT:\n{_balanced_source_excerpt(text, 6000)}"}],
+        temperature=0.0,
+        max_tokens=1600,
     ))
     decoded = _decode_ai_json(response.text)
     topics = decoded.get("topics", []) if isinstance(decoded, dict) else []
     normalized, seen_topics, seen_competencies = [], set(), set()
-    for topic_position, raw_topic in enumerate(topics[:12], start=1):
+    for topic_position, raw_topic in enumerate(topics[:8], start=1):
         if not isinstance(raw_topic, dict):
             continue
         topic_code = re.sub(r"[^A-Z0-9_-]", "", str(raw_topic.get("code") or f"T{topic_position}").upper())[:40] or f"T{topic_position}"
@@ -172,7 +175,7 @@ def analyze_curriculum_document(file_obj, filename, subject):
             topic_code = f"T{topic_position}"
         title = str(raw_topic.get("title", "")).strip()[:240]
         competencies = []
-        for competency_position, raw_competency in enumerate(raw_topic.get("competencies", [])[:10], start=1):
+        for competency_position, raw_competency in enumerate(raw_topic.get("competencies", [])[:4], start=1):
             if not isinstance(raw_competency, dict):
                 continue
             fallback = f"{topic_code}-C{competency_position}"

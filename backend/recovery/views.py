@@ -628,15 +628,16 @@ class SubjectViewSet(AuditedAdminModelMixin, viewsets.ModelViewSet):
     def analyze_curriculum(self, request, pk=None):
         subject = self.get_object()
         source_file = request.FILES.get("source_file")
-        if not source_file:
+        if source_file:
+            suffix = Path(source_file.name).suffix.casefold()
+            if suffix not in {".pdf", ".docx"}:
+                return Response({"source_file": "Only PDF and DOCX curriculum files are supported."}, status=status.HTTP_400_BAD_REQUEST)
+            if source_file.size > 25 * 1024 * 1024:
+                return Response({"source_file": "The curriculum file must not exceed 25 MB."}, status=status.HTTP_400_BAD_REQUEST)
+            subject.curriculum_source_file.save(Path(source_file.name).name, source_file, save=False)
+            subject.curriculum_source_name = Path(source_file.name).name
+        elif not subject.curriculum_source_file:
             return Response({"source_file": "Choose a PDF or DOCX curriculum file."}, status=status.HTTP_400_BAD_REQUEST)
-        suffix = Path(source_file.name).suffix.casefold()
-        if suffix not in {".pdf", ".docx"}:
-            return Response({"source_file": "Only PDF and DOCX curriculum files are supported."}, status=status.HTTP_400_BAD_REQUEST)
-        if source_file.size > 25 * 1024 * 1024:
-            return Response({"source_file": "The curriculum file must not exceed 25 MB."}, status=status.HTTP_400_BAD_REQUEST)
-        subject.curriculum_source_file.save(Path(source_file.name).name, source_file, save=False)
-        subject.curriculum_source_name = Path(source_file.name).name
         subject.curriculum_analysis_status = "processing"
         subject.curriculum_analysis = {}
         subject.curriculum_analysis_error = ""
@@ -649,11 +650,16 @@ class SubjectViewSet(AuditedAdminModelMixin, viewsets.ModelViewSet):
             subject.curriculum_analyzed_at = timezone.now()
             subject.save(update_fields=["curriculum_analysis", "curriculum_analysis_status", "curriculum_analyzed_at"])
             AuditEvent.objects.create(actor=request.user, action="subject.curriculum_analyzed", object_type="Subject", object_id=str(subject.id), metadata={"source_name": subject.curriculum_source_name, "topic_count": len(proposal["topics"])})
-        except (ContentImportError, LLMUnavailable, ValueError) as exc:
+        except (ContentImportError, ValueError) as exc:
             subject.curriculum_analysis_status = "failed"
             subject.curriculum_analysis_error = str(exc)[:2000]
             subject.save(update_fields=["curriculum_analysis_status", "curriculum_analysis_error"])
-            return Response(self.get_serializer(subject).data, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response({"detail": str(exc), "subject": self.get_serializer(subject).data}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        except LLMUnavailable as exc:
+            subject.curriculum_analysis_status = "failed"
+            subject.curriculum_analysis_error = str(exc)[:2000]
+            subject.save(update_fields=["curriculum_analysis_status", "curriculum_analysis_error"])
+            return Response({"detail": str(exc), "subject": self.get_serializer(subject).data}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(self.get_serializer(subject).data)
 
     @action(detail=True, methods=["post"], url_path="apply-curriculum")

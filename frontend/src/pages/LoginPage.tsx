@@ -106,15 +106,12 @@ export function LoginPage({ onLogin }: { onLogin: (email: string, password: stri
         }}
       >
         <Box sx={{ display: 'flex', gap: 1.25, alignItems: 'center' }}>
-          <Box component="img" src="/tala.png" alt="TALA-AI" sx={{ width: 42, height: 42, objectFit: 'contain' }} />
-          <Box>
-            <Typography fontWeight={800} lineHeight={1.1}>
-              TALA-AI
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              Talavera Senior High School
-            </Typography>
+          <Box sx={{ width: 48, height: 48, borderRadius: '50%', overflow: 'hidden', flexShrink: 0 }}>
+            <Box component="img" src="/tala-brand.png" alt="TALA-AI" onError={event => { event.currentTarget.onerror = null; event.currentTarget.src = '/tala.png'; }} sx={{ width: '100%', height: '100%', display: 'block', objectFit: 'cover', transform: 'scale(1.22)' }} />
           </Box>
+          <Typography fontWeight={800} lineHeight={1.1}>
+            TALA-AI
+          </Typography>
         </Box>
       </Box>
       <Box

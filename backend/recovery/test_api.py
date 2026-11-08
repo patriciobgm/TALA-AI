@@ -1,7 +1,7 @@
 import json
 import tempfile
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import mail, signing
@@ -18,7 +18,8 @@ from rest_framework.test import APITestCase
 from .account_security import _totp
 from .content_imports import _extract_pdf, generate_grounded_practice_questions, parse_module_questions
 from .learning_intelligence import rank_learning_resources
-from .llm.base import LLMResponse, LLMUnavailable
+from .llm.base import LLMRequest, LLMResponse, LLMUnavailable
+from .llm.openai_compatible import OpenAICompatibleProvider
 from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EmployeeProfile, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, NotificationDelivery, NotificationPreference, PrivacyAcknowledgment, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, Topic, UserProfile
 from .services import create_recovery_plan
 from .progression_engine import apply_competency_result
@@ -1560,10 +1561,46 @@ Answer: B
             self.assertEqual(analyzed.data["curriculum_analysis_status"], "ready")
             self.assertEqual(analyzed.data["curriculum_analysis"]["topics"][0]["competencies"][0]["code"], "NEW-01")
             self.assertFalse(Topic.objects.filter(subject_id=created.data["id"]).exists())
+            retried = self.client.post(f"/api/subjects/{created.data['id']}/analyze-curriculum/", {}, format="multipart")
+            self.assertEqual(retried.status_code, 200, retried.data)
+            self.assertEqual(retried.data["curriculum_analysis_status"], "ready")
+            self.assertEqual(provider_factory.return_value.generate.call_count, 2)
+            curriculum_request = provider_factory.return_value.generate.call_args_list[0].args[0]
+            self.assertEqual(curriculum_request.max_tokens, 1600)
+            self.assertLess(len(curriculum_request.messages[0]["content"]), 6500)
             applied = self.client.post(f"/api/subjects/{created.data['id']}/apply-curriculum/", {}, format="json")
             self.assertEqual(applied.status_code, 200, applied.data)
             self.assertEqual(Topic.objects.filter(subject_id=created.data["id"]).count(), 1)
             self.assertEqual(Competency.objects.filter(subject_id=created.data["id"]).count(), 1)
+
+    @patch("recovery.content_imports.get_llm_provider")
+    def test_curriculum_analysis_returns_a_clear_ai_unavailable_error(self, provider_factory):
+        provider_factory.return_value.generate.side_effect = LLMUnavailable("TALA curriculum analysis is temporarily unavailable.")
+        cluster = Cluster.objects.get(code="ACADEMIC")
+        self.authenticate("admin@tala.edu.ph")
+        created = self.client.post("/api/subjects/", {"name": "Unavailable Curriculum Subject", "code": "UCS", "grade_level": 11, "clusters": [cluster.id], "is_active": True}, format="json")
+        document = Document(); document.add_paragraph("A readable curriculum guide containing enough approved learning content and competency statements for analysis and administrator review.")
+        buffer = BytesIO(); document.save(buffer)
+        upload = SimpleUploadedFile("unavailable-guide.docx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            response = self.client.post(f"/api/subjects/{created.data['id']}/analyze-curriculum/", {"source_file": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertEqual(response.data["detail"], "TALA curriculum analysis is temporarily unavailable.")
+        self.assertEqual(response.data["subject"]["curriculum_analysis_status"], "failed")
+
+    @patch("recovery.llm.openai_compatible.urlopen")
+    def test_llama_provider_disables_prompt_cache_restoration(self, mocked_urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode()
+        mocked_urlopen.return_value.__enter__.return_value = response
+        provider = OpenAICompatibleProvider("llama_cpp", "http://127.0.0.1:8081/v1", "local", "llama-local")
+
+        provider.generate(LLMRequest(system="Return JSON.", messages=[{"role": "user", "content": "Test"}]))
+
+        payload = json.loads(mocked_urlopen.call_args.args[0].data.decode())
+        self.assertIs(payload["cache_prompt"], False)
+        self.assertEqual(payload["seed"], 42)
 
     def test_backend_blocks_direct_access_to_locked_competency(self):
         student = get_user_model().objects.get(username="student@tala.edu.ph")
