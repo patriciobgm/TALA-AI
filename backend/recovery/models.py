@@ -1016,6 +1016,37 @@ class ContentImport(models.Model):
     class Meta:
         ordering = ["-created_at"]
 
+
+class AssessmentQuestionImport(models.Model):
+    """A teacher-reviewed questionnaire extraction for one draft assessment."""
+
+    class Status(models.TextChoices):
+        PROCESSING = "processing", "Processing"
+        READY = "ready", "Ready for review"
+        APPLIED = "applied", "Applied to assessment"
+        FAILED = "failed", "Needs attention"
+
+    assessment = models.ForeignKey(Assessment, related_name="question_imports", on_delete=models.CASCADE)
+    source_file = models.FileField(upload_to="assessment-question-imports/%Y/%m/")
+    answer_key_file = models.FileField(upload_to="assessment-question-imports/%Y/%m/", null=True, blank=True)
+    original_filename = models.CharField(max_length=255)
+    answer_key_original_filename = models.CharField(max_length=255, blank=True)
+    source_checksum_sha256 = models.CharField(max_length=64)
+    answer_key_checksum_sha256 = models.CharField(max_length=64, blank=True)
+    configuration = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PROCESSING)
+    proposed_questions = models.JSONField(default=list, blank=True)
+    analysis_metadata = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True)
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="assessment_question_imports", on_delete=models.PROTECT)
+    applied_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, related_name="applied_assessment_question_imports", on_delete=models.SET_NULL)
+    applied_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
 class Notification(models.Model):
     class Kind(models.TextChoices):
         ENROLLMENT_REQUESTED = "enrollment_requested", "Enrollment requested"

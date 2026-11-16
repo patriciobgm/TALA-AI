@@ -98,10 +98,10 @@ export function AdminUsers({ superadmin, mode = 'users' }: { superadmin: boolean
   };
   const subjectOptions = subjects.filter(item => item.is_active && (!userForm.cluster_record || !item.clusters.length || item.clusters.includes(userForm.cluster_record))).map(item => ({ id: item.id, label: item.name, detail: `Grade ${item.grade_level} · ${item.code}` }));
   const teacherGrades = [...new Set(subjects.filter(item => userForm.assigned_subjects.includes(item.id)).map(item => item.grade_level))];
-  const derivedClasses = classes.filter(item => item.is_active && teacherGrades.includes(item.grade_level));
+  const derivedClasses = classes.filter(item => item.is_active && teacherGrades.includes(item.grade_level) && (!userForm.cluster_record || item.cluster === userForm.cluster_record));
 
   return <>
-    <PageHeader title={isClassTab ? 'Class Management' : 'User & Security Management'} description={isClassTab ? 'Maintain Grade 11 and Grade 12 sections. Teacher class access is derived from assigned subject grades.' : roleForTab === 'student' ? 'Learner accounts appear here after a public diagnostic identifies a remediation need.' : 'Manage identities, account status, recovery, and role-appropriate academic placement.'} action={!isClassTab && roleForTab === 'student' ? undefined : <Button variant="contained" startIcon={<Add />} onClick={() => isClassTab ? openClass() : openUser()}>{isClassTab ? 'Add Class' : `Add ${roleForTab.charAt(0).toUpperCase()}${roleForTab.slice(1)}`}</Button>} />
+    <PageHeader title={isClassTab ? 'Class Management' : 'User & Security Management'} description={isClassTab ? 'Maintain Grade 11 and Grade 12 sections. Teacher class access is derived from the assigned cluster and subject grades.' : roleForTab === 'student' ? 'Learner accounts appear here after a public diagnostic identifies a remediation need.' : 'Manage identities, account status, recovery, and role-appropriate academic placement.'} action={!isClassTab && roleForTab === 'student' ? undefined : <Button variant="contained" startIcon={<Add />} onClick={() => isClassTab ? openClass() : openUser()}>{isClassTab ? 'Add Class' : `Add ${roleForTab.charAt(0).toUpperCase()}${roleForTab.slice(1)}`}</Button>} />
     {(error || userTable.error || classTable.error) && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error || userTable.error || classTable.error}</Alert>}
     {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
     {isClassTab && <EnrollmentPanel role="admin" />}

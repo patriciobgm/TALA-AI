@@ -76,6 +76,19 @@ export interface ExtractedQuestion {
   source_locator?: string;
 }
 
+export interface AssessmentQuestionImport {
+  id: number;
+  assessment: number;
+  status: 'processing' | 'ready' | 'applied' | 'failed';
+  original_filename: string;
+  answer_key_original_filename: string;
+  proposed_questions: ExtractedQuestion[];
+  analysis_metadata: { method?: 'deterministic' | 'hybrid'; provider?: string; model?: string; detected_question_count?: number; proposed_question_count?: number; warning?: string };
+  error_message: string;
+  created_at: string;
+  applied_at: string | null;
+}
+
 export interface ContentImport {
   id: number;
   title: string;

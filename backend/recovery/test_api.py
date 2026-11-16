@@ -16,11 +16,13 @@ from io import BytesIO, StringIO
 from urllib.parse import urlsplit
 from rest_framework.test import APITestCase
 from .account_security import _totp
+from .assignment_rules import sync_teacher_classes
+from .assessment_question_imports import process_assessment_question_import
 from .content_imports import _extract_pdf, generate_grounded_practice_questions, parse_module_questions
 from .learning_intelligence import rank_learning_resources
 from .llm.base import LLMRequest, LLMResponse, LLMUnavailable
 from .llm.openai_compatible import OpenAICompatibleProvider
-from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, Cluster, Competency, CompetencyResult, ContentImport, EmployeeProfile, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, NotificationDelivery, NotificationPreference, PrivacyAcknowledgment, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, Topic, UserProfile
+from .models import AICompanionSession, AIHelpRequest, AIMessage, AIRecommendation, ActivityAttempt, AdaptiveLearningState, AcademicClass, Assessment, AssessmentAttempt, AssessmentEligibility, AssessmentQuestionImport, Cluster, Competency, CompetencyResult, ContentImport, EmployeeProfile, EnrollmentRequest, LearnerCompetencyEvidence, LearnerCompetencyState, LearnerMisconception, LearningAssignment, LearningGoal, LearningResource, LearningResourceChunk, Misconception, Notification, NotificationDelivery, NotificationPreference, PrivacyAcknowledgment, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, Topic, UserProfile
 from .services import create_recovery_plan
 from .progression_engine import apply_competency_result
 from .companion_intelligence import record_question_outcome
@@ -43,6 +45,64 @@ class RecoveryApiTests(APITestCase):
 
     def correct_practice_answers(self, activity):
         return {str(question.id): question.correct_answer for question in activity.resource.practice_questions.all()}
+
+    def test_teacher_class_derivation_respects_cluster_and_subject_grade(self):
+        teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
+        profile = teacher.tala_profile
+        academic = Cluster.objects.get(code="ACADEMIC")
+        tech_pro = Cluster.objects.get(code="TECH-PRO")
+        profile.employee_details.cluster = tech_pro
+        profile.employee_details.save(update_fields=["cluster"])
+        subject = Subject.objects.create(name="Cluster-scoped subject", code="CLUSTER-SCOPE", grade_level=12)
+        subject.clusters.add(tech_pro)
+        profile.assigned_subjects.set([subject])
+        academic_class = AcademicClass.objects.create(name="Academic Test Section", grade_level=12, cluster=academic, school_year="2026-2027")
+        tech_pro_class = AcademicClass.objects.create(name="Tech Pro Test Section", grade_level=12, cluster=tech_pro, school_year="2026-2027")
+
+        sync_teacher_classes(profile)
+
+        self.assertEqual(list(profile.assigned_classes.values_list("id", flat=True)), [tech_pro_class.id])
+        self.assertFalse(profile.assigned_classes.filter(pk=academic_class.id).exists())
+
+    @patch("recovery.tasks.process_assessment_question_import_task.delay")
+    def test_teacher_imports_questionnaire_and_separate_answer_key_for_review(self, enqueue):
+        self.authenticate("teacher@tala.edu.ph")
+        teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
+        competency = teacher.tala_profile.assigned_subjects.filter(competencies__is_active=True).first().competencies.filter(is_active=True).first()
+        assessment = Assessment.objects.create(title="Imported questionnaire draft", subject=competency.subject, kind=Assessment.Kind.PRE, created_by=teacher, is_active=False)
+        questionnaire = Document()
+        questionnaire.add_paragraph("1. Which option is correct?")
+        questionnaire.add_paragraph("A. First")
+        questionnaire.add_paragraph("B. Second")
+        questionnaire.add_paragraph("C. Third")
+        questionnaire.add_paragraph("D. Fourth")
+        questionnaire.add_paragraph("2. TALA supports teacher review.")
+        questionnaire.add_paragraph("A. True")
+        questionnaire.add_paragraph("B. False")
+        questionnaire_buffer = BytesIO(); questionnaire.save(questionnaire_buffer)
+        answer_key = Document()
+        answer_key.add_paragraph("1. B")
+        answer_key.add_paragraph("2. A")
+        answer_key_buffer = BytesIO(); answer_key.save(answer_key_buffer)
+        response = self.client.post(
+            f"/api/assessments/{assessment.id}/question-imports/",
+            {
+                "default_competency_id": competency.id,
+                "source_file": SimpleUploadedFile("questionnaire.docx", questionnaire_buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                "answer_key_file": SimpleUploadedFile("answer-key.docx", answer_key_buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            },
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 202, response.data)
+        enqueue.assert_called_once_with(response.data["id"])
+        record = process_assessment_question_import(response.data["id"])
+        self.assertEqual(record.status, AssessmentQuestionImport.Status.READY, record.error_message)
+        self.assertEqual(len(record.proposed_questions), 2)
+        self.assertEqual(record.proposed_questions[0]["correct_answer"], "Second")
+        applied = self.client.post(f"/api/assessments/{assessment.id}/question-imports/{record.id}/apply/", {"questions": record.proposed_questions}, format="json")
+        self.assertEqual(applied.status_code, 201, applied.data)
+        self.assertEqual(assessment.questions.count(), 2)
+        self.assertEqual(assessment.questions.first().generation_metadata["review_status"], "teacher_approved")
 
     def test_companion_v1_session_help_handoff_and_evidence_flow(self):
         self.authenticate()
@@ -418,13 +478,15 @@ References
         self.assertEqual(updated.status_code, 200, updated.data)
         self.assertEqual(updated.data["status"], "Inactive")
 
-    def test_teacher_class_access_is_derived_from_assigned_subject_grades(self):
+    def test_teacher_class_access_is_derived_from_assigned_cluster_and_subject_grades(self):
         self.authenticate("admin@tala.edu.ph")
         teacher = get_user_model().objects.get(username="teacher@tala.edu.ph")
+        teacher_cluster = teacher.tala_profile.employee_details.cluster
         grade_twelve_subject = Subject.objects.create(name="Grade Twelve Test Subject", code="G12-TEST", grade_level=12, is_active=True)
+        grade_twelve_subject.clusters.add(teacher_cluster)
         response = self.client.patch(f"/api/users/{teacher.id}/", {"assigned_subjects": [grade_twelve_subject.id], "assigned_classes": []}, format="json")
         self.assertEqual(response.status_code, 200, response.data)
-        expected = set(AcademicClass.objects.filter(grade_level=12, is_active=True).values_list("id", flat=True))
+        expected = set(AcademicClass.objects.filter(grade_level=12, cluster=teacher_cluster, is_active=True).values_list("id", flat=True))
         self.assertEqual(set(response.data["assigned_classes"]), expected)
         self.assertEqual(set(teacher.tala_profile.assigned_classes.values_list("id", flat=True)), expected)
 

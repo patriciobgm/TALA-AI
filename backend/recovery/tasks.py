@@ -12,6 +12,14 @@ from .models import AICompanionSession, ActivityAttempt, Notification, Notificat
 from .notifications import assigned_teachers_for, notify
 
 
+@shared_task
+def process_assessment_question_import_task(import_id):
+    from .assessment_question_imports import process_assessment_question_import
+
+    record = process_assessment_question_import(import_id)
+    return record.status
+
+
 @shared_task(bind=True, autoretry_for=(OSError,), retry_backoff=True, retry_kwargs={"max_retries": 2})
 def process_video_content_import(self, content_import_id):
     from django.contrib.auth import get_user_model

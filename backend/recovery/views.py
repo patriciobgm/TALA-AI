@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -27,7 +28,7 @@ from rest_framework.throttling import AnonRateThrottle
 from .content_imports import ContentImportError, analyze_curriculum_document, process_content_import, publish_content_import, sync_published_practice_questions
 from .learning_intelligence import rank_learning_resources, record_evidence
 from .companion_intelligence import record_question_outcome, update_learning_outcome
-from .models import AIHelpRequest, AIMessage, AIMessageEvaluation, AIRecommendation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AuditEvent, Cluster, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GradeLevel, GuardianContact, Intervention, LearnerCompetencyEvidence, LearnerCompetencyState, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningGap, LearningQuizSession, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyAcknowledgment, PrivacyRequest, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, SystemConfiguration, Topic, UsabilityEvaluation, UserProfile
+from .models import AIHelpRequest, AIMessage, AIMessageEvaluation, AIRecommendation, AcademicClass, ActivityAttempt, Assessment, AssessmentAttempt, AssessmentEligibility, AssessmentQuestionImport, AuditEvent, Cluster, Competency, CompetencyResult, ContentImport, DeviceRegistration, EnrollmentRequest, GradeLevel, GuardianContact, Intervention, LearnerCompetencyEvidence, LearnerCompetencyState, LearningAssignment, LearningAssignmentProgress, LearningAssignmentQuizAttempt, LearningGap, LearningQuizSession, LearningRecommendationDecision, LearningResource, Notification, NotificationPreference, PrivacyAcknowledgment, PrivacyRequest, PublicDiagnosticSession, Question, RecoveryActivity, RecoveryPlan, RemedialExamConsent, ResearchEvaluationSnapshot, StudentAnswer, StudentProfile, Subject, SubjectEnrollment, SubjectOffering, SystemConfiguration, Topic, UsabilityEvaluation, UserProfile
 from .assessment_rules import incomplete_prerequisite_assignments, matching_diagnostic_assignments, remedial_student_is_eligible
 from .llm.base import LLMRequest, LLMUnavailable
 from .llm.factory import get_llm_provider
@@ -1039,6 +1040,21 @@ class LearningAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
             session = LearningQuizSession.objects.create(assignment=assignment, student=request.user, started_at=now, expires_at=now + timedelta(minutes=minutes))
         return Response({"session_id": session.id, "started_at": session.started_at, "expires_at": session.expires_at, "time_limit_minutes": assignment.quiz_time_limit_minutes})
 
+def _assessment_question_import_data(record):
+    return {
+        "id": record.id,
+        "assessment": record.assessment_id,
+        "status": record.status,
+        "original_filename": record.original_filename,
+        "answer_key_original_filename": record.answer_key_original_filename,
+        "proposed_questions": record.proposed_questions,
+        "analysis_metadata": record.analysis_metadata,
+        "error_message": record.error_message,
+        "created_at": record.created_at,
+        "applied_at": record.applied_at,
+    }
+
+
 class AssessmentViewSet(viewsets.ModelViewSet):
     queryset = Assessment.objects.select_related("subject", "created_by").prefetch_related("questions", "assigned_classes", "remedial_consents").order_by("title", "id")
 
@@ -1167,6 +1183,122 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         question = serializer.save()
         AuditEvent.objects.create(actor=request.user, action="assessment.question_updated", object_type="Question", object_id=str(question.id), metadata={"assessment_id": assessment.id})
         return Response(QuestionEditorSerializer(question).data)
+
+    @action(detail=True, methods=["post"], url_path="question-imports")
+    def create_question_import(self, request, pk=None):
+        assessment = self.get_object()
+        if assessment.is_active:
+            return Response({"detail": "Return the assessment to draft before importing questions."}, status=status.HTTP_409_CONFLICT)
+        if role_for(request.user) == UserProfile.Role.TEACHER and not request.user.tala_profile.assigned_subjects.filter(pk=assessment.subject_id).exists():
+            raise PermissionDenied("You are not assigned to this assessment subject.")
+        source_file = request.FILES.get("source_file")
+        answer_key_file = request.FILES.get("answer_key_file")
+        if not source_file:
+            return Response({"source_file": "Choose a questionnaire PDF or DOCX."}, status=status.HTTP_400_BAD_REQUEST)
+        for field_name, uploaded in (("source_file", source_file), ("answer_key_file", answer_key_file)):
+            if not uploaded:
+                continue
+            if Path(uploaded.name).suffix.casefold() not in {".pdf", ".docx"}:
+                return Response({field_name: "Only text-based PDF and DOCX files are supported."}, status=status.HTTP_400_BAD_REQUEST)
+            if uploaded.size > 25 * 1024 * 1024:
+                return Response({field_name: "The file must not exceed 25 MB."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            default_competency_id = int(request.data.get("default_competency_id"))
+        except (TypeError, ValueError):
+            return Response({"default_competency_id": "Choose a default competency."}, status=status.HTTP_400_BAD_REQUEST)
+        if not Competency.objects.filter(pk=default_competency_id, subject=assessment.subject, is_active=True).exists():
+            return Response({"default_competency_id": "Choose an active competency from this assessment subject."}, status=status.HTTP_400_BAD_REQUEST)
+
+        def digest(uploaded):
+            checksum = hashlib.sha256()
+            for chunk in uploaded.chunks():
+                checksum.update(chunk)
+            uploaded.seek(0)
+            return checksum.hexdigest()
+
+        record = AssessmentQuestionImport.objects.create(
+            assessment=assessment,
+            source_file=source_file,
+            answer_key_file=answer_key_file,
+            original_filename=Path(source_file.name).name,
+            answer_key_original_filename=Path(answer_key_file.name).name if answer_key_file else "",
+            source_checksum_sha256=digest(source_file),
+            answer_key_checksum_sha256=digest(answer_key_file) if answer_key_file else "",
+            configuration={"default_competency_id": default_competency_id},
+            uploaded_by=request.user,
+        )
+        from .tasks import process_assessment_question_import_task
+        process_assessment_question_import_task.delay(record.id)
+        AuditEvent.objects.create(actor=request.user, action="assessment.question_import_started", object_type="AssessmentQuestionImport", object_id=str(record.id), metadata={"assessment_id": assessment.id, "source_filename": record.original_filename, "has_separate_answer_key": bool(answer_key_file)})
+        return Response(_assessment_question_import_data(record), status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["get"], url_path=r"question-imports/(?P<import_id>\d+)")
+    def question_import_detail(self, request, pk=None, import_id=None):
+        assessment = self.get_object()
+        record = assessment.question_imports.filter(pk=import_id).first()
+        if not record:
+            return Response({"detail": "Questionnaire import not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(_assessment_question_import_data(record))
+
+    @action(detail=True, methods=["post"], url_path=r"question-imports/(?P<import_id>\d+)/apply")
+    def apply_question_import(self, request, pk=None, import_id=None):
+        assessment = self.get_object()
+        if assessment.is_active:
+            return Response({"detail": "Return the assessment to draft before importing questions."}, status=status.HTTP_409_CONFLICT)
+        record = assessment.question_imports.filter(pk=import_id).first()
+        if not record:
+            return Response({"detail": "Questionnaire import not found."}, status=status.HTTP_404_NOT_FOUND)
+        if record.status != AssessmentQuestionImport.Status.READY:
+            return Response({"detail": "Only a questionnaire that is ready for review can be applied."}, status=status.HTTP_409_CONFLICT)
+        rows = request.data.get("questions", record.proposed_questions)
+        if not isinstance(rows, list) or not rows or len(rows) > 100:
+            return Response({"questions": "Review and submit between 1 and 100 questions."}, status=status.HTTP_400_BAD_REQUEST)
+        existing_prompts = {re.sub(r"\W+", " ", value.casefold()).strip() for value in assessment.questions.values_list("prompt", flat=True)}
+        seen = set()
+        validated = []
+        for position, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                return Response({"questions": f"Question {position} is invalid."}, status=status.HTTP_400_BAD_REQUEST)
+            normalized_prompt = re.sub(r"\W+", " ", str(row.get("prompt", "")).casefold()).strip()
+            if not normalized_prompt or normalized_prompt in existing_prompts or normalized_prompt in seen:
+                return Response({"questions": f"Question {position} is empty or duplicates another assessment question."}, status=status.HTTP_400_BAD_REQUEST)
+            seen.add(normalized_prompt)
+            serializer = QuestionEditorSerializer(data={
+                "competency": row.get("competency_id"),
+                "prompt": row.get("prompt"),
+                "question_type": row.get("question_type"),
+                "options": row.get("options", []),
+                "correct_answer": row.get("correct_answer"),
+                "character_limit": row.get("character_limit", 500 if row.get("question_type") == Question.QuestionType.ESSAY else 240),
+            })
+            serializer.is_valid(raise_exception=True)
+            if serializer.validated_data["competency"].subject_id != assessment.subject_id:
+                return Response({"questions": f"Question {position} must use a competency from this assessment subject."}, status=status.HTTP_400_BAD_REQUEST)
+            validated.append((serializer, row))
+        with transaction.atomic():
+            questions = []
+            for serializer, row in validated:
+                question = serializer.save(assessment=assessment, generation_metadata={
+                    "source": "questionnaire_import",
+                    "question_import_id": record.id,
+                    "source_filename": record.original_filename,
+                    "source_checksum_sha256": record.source_checksum_sha256,
+                    "provenance": row.get("provenance", "extracted"),
+                    "source_locator": row.get("source_locator", ""),
+                    "analysis_method": record.analysis_metadata.get("method", "deterministic"),
+                    "provider": record.analysis_metadata.get("provider", ""),
+                    "model": record.analysis_metadata.get("model", ""),
+                    "review_status": "teacher_approved",
+                    "reviewed_by": request.user.id,
+                })
+                questions.append(question)
+            record.status = AssessmentQuestionImport.Status.APPLIED
+            record.applied_by = request.user
+            record.applied_at = timezone.now()
+            record.proposed_questions = rows
+            record.save(update_fields=["status", "applied_by", "applied_at", "proposed_questions", "updated_at"])
+            AuditEvent.objects.create(actor=request.user, action="assessment.question_import_applied", object_type="AssessmentQuestionImport", object_id=str(record.id), metadata={"assessment_id": assessment.id, "question_count": len(questions)})
+        return Response({"import": _assessment_question_import_data(record), "questions": QuestionEditorSerializer(questions, many=True).data}, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="generate-questions")
     def generate_questions(self, request, pk=None):
